@@ -1,5 +1,5 @@
 use crate::ast::{Expr, FnDecl, Op, Stmt};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct Env {
     global_gen: BTreeMap<String, usize>,
@@ -113,24 +113,25 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 process_block(else_block, env, smt);
                 let else_scope = env.current_scope.clone();
 
-                // 4. MERGE (Phi Node)
-                // Identify all vars modified in either branch
-                for (var, &v_start) in &start_scope {
-                    let v_then = then_scope.get(var).copied().unwrap_or(v_start);
-                    let v_else = else_scope.get(var).copied().unwrap_or(v_start);
+                let mut vars = BTreeSet::new();
+                vars.extend(start_scope.keys().cloned());
+                vars.extend(then_scope.keys().cloned());
+                vars.extend(else_scope.keys().cloned());
 
-                    // If the version changed in EITHER branch...
+                for var in vars {
+                    let v_start = *start_scope.get(&var).unwrap_or(&0);
+                    let v_then = *then_scope.get(&var).unwrap_or(&v_start);
+                    let v_else = *else_scope.get(&var).unwrap_or(&v_start);
+
                     if v_then != v_start || v_else != v_start {
-                        let name_then = format!("{}_{}", var, v_then);
-                        let name_else = format!("{}_{}", var, v_else);
-
-                        // Create x_3
-                        let name_merged = env.new_version(var);
-
-                        smt.push_str(&format!("(declare-const {} Int)\n", name_merged));
+                        let merged = env.new_version(&var);
+                        smt.push_str(&format!("(declare-const {} Int)\n", merged));
                         smt.push_str(&format!(
                             "(assert (= {} (ite {} {} {})))\n",
-                            name_merged, cond_smt, name_then, name_else
+                            merged,
+                            cond_smt,
+                            format!("{}_{}", var, v_then),
+                            format!("{}_{}", var, v_else)
                         ));
                     }
                 }
@@ -204,17 +205,26 @@ pub fn compile(func: &FnDecl) -> String {
     }
 
     // Preconditions
-    for req in &func.requires {
-        smt.push_str(&format!("(assert {})\n", expr_to_smt(req, &env)));
-    }
+    let requires = if func.requires.is_empty() {
+        "true".to_string()
+    } else {
+        format!(
+            "(and {})",
+            func.requires
+                .iter()
+                .map(|r| expr_to_smt(r, &env))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
 
     // Body
     process_block(&func.body, &mut env, &mut smt);
 
     // Postconditions
     for ens in &func.ensures {
-        let cond = expr_to_smt(ens, &env);
-        smt.push_str(&format!("(assert (not {}))\n", cond));
+        let post = expr_to_smt(ens, &env);
+        smt.push_str(&format!("(assert (and {} (not {})))\n", requires, post));
     }
 
     smt.push_str("(check-sat)\n");
@@ -315,7 +325,7 @@ mod tests {
 
         // 5. Verify Post-condition Negation
         // Must check (not (>= y_4 0))
-        assert!(smt_output.contains("(assert (not (>= y_4 0)))"));
+        assert!(smt_output.contains("(not (>= y_4 0))"));
 
         // 6. Verify Solver Command
         assert!(smt_output.contains("(check-sat)"));
