@@ -141,67 +141,51 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 body,
             } => {
                 // --- STEP 1: Assert Invariant holds on Entry ---
-                let inv_str = expr_to_smt(invariant, env);
-                smt.push_str(&format!("; Check Loop Invariant (Entry)\n"));
-                smt.push_str(&format!("(assert {})\n", inv_str));
+                // Does the invariant hold BEFORE the loop starts?
+                let inv_entry = expr_to_smt(invariant, env);
+                smt.push_str("; CHECK 1: Loop Entry Invariant\n");
+                smt.push_str("(push)\n");
+                smt.push_str(&format!("(assert (not {}))\n", inv_entry)); // Negate to find bug
+                smt.push_str("(check-sat)\n");
+                smt.push_str("(pop)\n");
 
-                // --- STEP 2: Havoc (Fast Forward) ---
-                // Create new versions for ALL variables modified in the loop
+                // --- 2. HAVOC & SETUP ---
+                // Fast-forward to an arbitrary iteration
                 let modified = get_modified_vars(body);
-
                 for var in &modified {
                     let new_ver = env.new_version(var);
                     smt.push_str(&format!("(declare-const {} Int)\n", new_ver));
                 }
 
-                // --- STEP 3: Assume Invariant holds in Havoc state ---
+                // Assume we are in a valid state (Invariant is True)
                 let inv_havoc = expr_to_smt(invariant, env);
-                smt.push_str(&format!("; Assume Invariant (Havoc)\n"));
                 smt.push_str(&format!("(assert {})\n", inv_havoc));
 
-                // --- STEP 4: Verify Body Preserves Invariant ---
-                // We perform a "hypothetical" step:
-                // If (Cond) is true -> Run Body -> Assert Invariant
+                // --- 3. BODY CHECK ---
+                // If (Cond is True) AND (Body runs) -> Does Invariant still hold?
+                smt.push_str("; CHECK 2: Loop Body Maintenance\n");
+                smt.push_str("(push)\n");
 
+                // A. Assume Loop Condition is True
                 let cond_havoc = expr_to_smt(cond, env);
-
-                // We use "=>" (Implies) for this check:
-                // (Cond AND Body_Logic) IMPLIES Invariant
-                // But since we are generating a flat list of assertions,
-                // we simulate this by branching logic or strictly checking the body block.
-
-                // For a flat VCG, the standard way is:
-                // 4a. Assume Loop Condition is TRUE
                 smt.push_str(&format!("(assert {})\n", cond_havoc));
 
-                // 4b. Process Body (generates new versions)
-                process_block(body, env, smt);
+                // B. Run Body (This advances variable versions in 'env')
+                // CRITICAL: We need a temporary env clone so we don't mess up the main path
+                let mut body_env = Env {
+                    global_gen: env.global_gen.clone(),
+                    current_scope: env.current_scope.clone(),
+                };
+                process_block(body, &mut body_env, smt);
 
-                // 4c. Assert Invariant holds AGAIN
-                let inv_post = expr_to_smt(invariant, env);
-                smt.push_str(&format!("; Check Invariant Preserved\n"));
-                smt.push_str(&format!("(assert {})\n", inv_post));
+                // C. Check Invariant Post-Body
+                let inv_post = expr_to_smt(invariant, &body_env);
+                smt.push_str(&format!("(assert (not {}))\n", inv_post)); // Negate to check
+                smt.push_str("(check-sat)\n");
+                smt.push_str("(pop)\n");
 
-                // --- STEP 5: Exit the Loop ---
-                // To continue verifying the REST of the function, we must:
-                // 1. Go back to the 'Havoc' state (before we ran the hypothetical body step)
-                //    Wait! We actually want to continue from the state where
-                //    Invariant is True AND Condition is False.
-
-                // RE-HAVOC: We need fresh variables representing the state "After Loop".
-                // Why? Because the body execution above was just a "check".
-                // We don't actually know if the loop ran 1 time or 100 times.
-
-                for var in &modified {
-                    let new_ver = env.new_version(var);
-                    smt.push_str(&format!("(declare-const {} Int)\n", new_ver));
-                }
-
-                // Assume Invariant holds (it always does)
-                let inv_exit = expr_to_smt(invariant, env);
-                smt.push_str(&format!("(assert {})\n", inv_exit));
-
-                // Assume Loop Condition is FALSE (Exit condition)
+                // --- 4. EXIT PATH ---
+                // Continue the main analysis assuming the Loop Condition is FALSE
                 let cond_exit = expr_to_smt(cond, env);
                 smt.push_str(&format!("(assert (not {}))\n", cond_exit));
             }
@@ -239,6 +223,7 @@ pub fn compile(func: &FnDecl) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::verify_with_z3;
 
     fn var(s: &str) -> Box<Expr> {
         Box::new(Expr::Var(s.to_string()))
@@ -333,5 +318,47 @@ mod tests {
 
         // 6. Verify Solver Command
         assert!(smt_output.contains("(check-sat)"));
+    }
+
+    #[test]
+    fn test_loop_body_verification_fails() {
+        // BUGGY CODE:
+        // i = 0
+        // while i < n invariant i <= n {
+        //    i = i - 1; // <--- BUG! This breaks the invariant (i <= n) or termination?
+        //               // Actually, if i becomes -1, -1 <= n is still true...
+        //               // Let's make a clearer bug:
+        //               // Invariant: i >= 0. Body: i = i - 1.
+        // }
+
+        let func = FnDecl {
+            name: "buggy_loop".to_string(),
+            params: vec!["n".to_string()],
+            requires: vec![bin(var("n"), Op::Gt, int(0))],
+            body: vec![
+                Stmt::Assign {
+                    target: "i".to_string(),
+                    value: Expr::IntLit(0),
+                },
+                Stmt::While {
+                    cond: bin(var("i"), Op::Lt, var("n")),
+                    invariant: bin(var("i"), Op::Gte, int(0)), // i must stay positive
+                    body: vec![
+                        // BUG: Decrementing i makes it negative!
+                        Stmt::Assign {
+                            target: "i".to_string(),
+                            value: bin(var("i"), Op::Sub, int(1)),
+                        },
+                    ],
+                },
+            ],
+            ensures: vec![],
+        };
+
+        let smt = compile(&func);
+        let result = verify_with_z3(&smt);
+
+        // This MUST fail. If it says "Ok", your verifier is broken.
+        assert!(result.is_err());
     }
 }
