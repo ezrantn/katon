@@ -80,9 +80,11 @@ mod tests {
     fn int(i: i64) -> Box<Expr> {
         Box::new(Expr::IntLit(i))
     }
+
     fn var(s: &str) -> Box<Expr> {
         Box::new(Expr::Var(s.to_string()))
     }
+
     fn bin(l: Box<Expr>, op: Op, r: Box<Expr>) -> Expr {
         Expr::Binary(l, op, r)
     }

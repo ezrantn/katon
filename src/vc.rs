@@ -1,5 +1,5 @@
 use crate::ast::{Expr, FnDecl, Op, Stmt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 struct Env {
     global_gen: HashMap<String, usize>,
@@ -91,27 +91,17 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
 
                 // 4. MERGE (Phi Node)
                 // Identify all vars modified in either branch
-                let mut all_vars: HashSet<String> = HashSet::new();
-                for k in then_scope.keys() {
-                    all_vars.insert(k.clone());
-                }
+                for (var, &v_start) in &start_scope {
+                    let v_then = then_scope.get(var).copied().unwrap_or(v_start);
+                    let v_else = else_scope.get(var).copied().unwrap_or(v_start);
 
-                for k in else_scope.keys() {
-                    all_vars.insert(k.clone());
-                }
-
-                for var in all_vars {
-                    let v_then = then_scope.get(&var).unwrap_or(&0);
-                    let v_else = else_scope.get(&var).unwrap_or(&0);
-                    let v_start = start_scope.get(&var).unwrap_or(&0);
-
-                    // If either branch changed the variable relative to start...
+                    // If the version changed in EITHER branch...
                     if v_then != v_start || v_else != v_start {
                         let name_then = format!("{}_{}", var, v_then);
                         let name_else = format!("{}_{}", var, v_else);
 
-                        // Create a NEW global version for the merge
-                        let name_merged = env.new_version(&var);
+                        // Create x_3
+                        let name_merged = env.new_version(var);
 
                         smt.push_str(&format!("(declare-const {} Int)\n", name_merged));
                         smt.push_str(&format!(
@@ -119,7 +109,6 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                             name_merged, cond_smt, name_then, name_else
                         ));
                     }
-                    // Else: variable wasn't touched in either branch, do nothing.
                 }
             }
         }
@@ -151,4 +140,104 @@ pub fn compile(func: &FnDecl) -> String {
 
     smt.push_str("(check-sat)\n");
     smt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn var(s: &str) -> Box<Expr> {
+        Box::new(Expr::Var(s.to_string()))
+    }
+
+    fn int(i: i64) -> Box<Expr> {
+        Box::new(Expr::IntLit(i))
+    }
+
+    fn bin(l: Box<Expr>, op: Op, r: Box<Expr>) -> Expr {
+        Expr::Binary(l, op, r)
+    }
+
+    #[test]
+    fn test_compile_abs_function_with_merge() {
+        // LOGIC TO TEST:
+        // fn abs(x: int) {
+        //    let y = x;       <-- y_1 defined here (Start Scope for IF)
+        //    if x < 0 {
+        //       y = 0 - x;    <-- y_2 (Then Branch)
+        //    } else {
+        //       y = x;        <-- y_3 (Else Branch)
+        //    }
+        //    // Merge happens here: y_4 = ite(..., y_2, y_3)
+        // }
+        // ensures y >= 0
+
+        let func = FnDecl {
+            name: "abs".to_string(),
+            params: vec!["x".to_string()], // x_0 declared automatically
+            requires: vec![],
+            body: vec![
+                // 1. Init y = x
+                Stmt::Assign {
+                    target: "y".to_string(),
+                    value: Expr::Var("x".to_string()),
+                },
+                // 2. If x < 0
+                Stmt::If {
+                    cond: bin(var("x"), Op::Lt, int(0)),
+                    then_block: vec![
+                        // y = 0 - x
+                        Stmt::Assign {
+                            target: "y".to_string(),
+                            value: bin(int(0), Op::Sub, var("x")),
+                        },
+                    ],
+                    else_block: vec![
+                        // y = x
+                        Stmt::Assign {
+                            target: "y".to_string(),
+                            value: Expr::Var("x".to_string()),
+                        },
+                    ],
+                },
+            ],
+            ensures: vec![
+                // y >= 0
+                bin(var("y"), Op::Gte, int(0)),
+            ],
+        };
+
+        let smt_output = compile(&func);
+
+        println!("Generated SMT:\n{}", smt_output);
+
+        // --- ASSERTIONS ---
+
+        // 1. Verify Inputs
+        assert!(smt_output.contains("(declare-const x_0 Int)"));
+
+        // 2. Verify Initial Assignment (y = x) -> y_1
+        // Note: env.new_version increments first, so 0->1.
+        assert!(smt_output.contains("(declare-const y_1 Int)"));
+        assert!(smt_output.contains("(= y_1 x_0)"));
+
+        // 3. Verify Branches (y_2 and y_3)
+        // Then block: y = 0 - x
+        assert!(smt_output.contains("(= y_2 (- 0 x_0))"));
+
+        // Else block: y = x (Depending on scope reuse, likely y_3)
+        assert!(smt_output.contains("(= y_3 x_0)"));
+
+        // 4. Verify THE MERGE (Phi Node)
+        // This is the critical part. It must define y_4 using 'ite'
+        assert!(smt_output.contains("(declare-const y_4 Int)"));
+        assert!(smt_output.contains("ite (< x_0 0) y_2 y_3"));
+
+        // 5. Verify Post-condition Negation
+        // Must check (not (>= y_4 0))
+        assert!(smt_output.contains("(assert (not (>= y_4 0)))"));
+
+        // 6. Verify Solver Command
+        assert!(smt_output.contains("(check-sat)"));
+    }
 }
