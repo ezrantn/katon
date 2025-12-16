@@ -32,6 +32,11 @@ pub enum Stmt {
         then_block: Vec<Stmt>,
         else_block: Vec<Stmt>,
     },
+    While {
+        cond: Expr,
+        invariant: Expr, // The user MUST use invariant for now
+        body: Vec<Stmt>,
+    },
 }
 
 pub struct FnDecl {

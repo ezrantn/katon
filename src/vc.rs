@@ -61,6 +61,30 @@ fn expr_to_smt(expr: &Expr, env: &Env) -> String {
     }
 }
 
+fn get_modified_vars(stmts: &[Stmt]) -> Vec<String> {
+    let mut vars = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { target, .. } => vars.push(target.clone()),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                vars.extend(get_modified_vars(then_block));
+                vars.extend(get_modified_vars(else_block));
+            }
+            Stmt::While { body, .. } => {
+                vars.extend(get_modified_vars(body));
+            }
+        }
+    }
+
+    vars.sort();
+    vars.dedup(); // Remove duplicates
+    vars
+}
+
 fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
     for stmt in stmts {
         match stmt {
@@ -110,6 +134,76 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                         ));
                     }
                 }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                body,
+            } => {
+                // --- STEP 1: Assert Invariant holds on Entry ---
+                let inv_str = expr_to_smt(invariant, env);
+                smt.push_str(&format!("; Check Loop Invariant (Entry)\n"));
+                smt.push_str(&format!("(assert {})\n", inv_str));
+
+                // --- STEP 2: Havoc (Fast Forward) ---
+                // Create new versions for ALL variables modified in the loop
+                let modified = get_modified_vars(body);
+
+                for var in &modified {
+                    let new_ver = env.new_version(var);
+                    smt.push_str(&format!("(declare-const {} Int)\n", new_ver));
+                }
+
+                // --- STEP 3: Assume Invariant holds in Havoc state ---
+                let inv_havoc = expr_to_smt(invariant, env);
+                smt.push_str(&format!("; Assume Invariant (Havoc)\n"));
+                smt.push_str(&format!("(assert {})\n", inv_havoc));
+
+                // --- STEP 4: Verify Body Preserves Invariant ---
+                // We perform a "hypothetical" step:
+                // If (Cond) is true -> Run Body -> Assert Invariant
+
+                let cond_havoc = expr_to_smt(cond, env);
+
+                // We use "=>" (Implies) for this check:
+                // (Cond AND Body_Logic) IMPLIES Invariant
+                // But since we are generating a flat list of assertions,
+                // we simulate this by branching logic or strictly checking the body block.
+
+                // For a flat VCG, the standard way is:
+                // 4a. Assume Loop Condition is TRUE
+                smt.push_str(&format!("(assert {})\n", cond_havoc));
+
+                // 4b. Process Body (generates new versions)
+                process_block(body, env, smt);
+
+                // 4c. Assert Invariant holds AGAIN
+                let inv_post = expr_to_smt(invariant, env);
+                smt.push_str(&format!("; Check Invariant Preserved\n"));
+                smt.push_str(&format!("(assert {})\n", inv_post));
+
+                // --- STEP 5: Exit the Loop ---
+                // To continue verifying the REST of the function, we must:
+                // 1. Go back to the 'Havoc' state (before we ran the hypothetical body step)
+                //    Wait! We actually want to continue from the state where
+                //    Invariant is True AND Condition is False.
+
+                // RE-HAVOC: We need fresh variables representing the state "After Loop".
+                // Why? Because the body execution above was just a "check".
+                // We don't actually know if the loop ran 1 time or 100 times.
+
+                for var in &modified {
+                    let new_ver = env.new_version(var);
+                    smt.push_str(&format!("(declare-const {} Int)\n", new_ver));
+                }
+
+                // Assume Invariant holds (it always does)
+                let inv_exit = expr_to_smt(invariant, env);
+                smt.push_str(&format!("(assert {})\n", inv_exit));
+
+                // Assume Loop Condition is FALSE (Exit condition)
+                let cond_exit = expr_to_smt(cond, env);
+                smt.push_str(&format!("(assert (not {}))\n", cond_exit));
             }
         }
     }

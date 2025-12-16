@@ -68,6 +68,46 @@ impl BorrowChecker {
 
                 Ok(())
             }
+            Stmt::While {
+                cond,
+                invariant,
+                body,
+            } => {
+                self.check_expr(cond)?;
+                self.check_expr(invariant)?;
+
+                // Snapshot scope before loop
+                let start_scope = self.scope.clone();
+
+                // Check body
+                for s in body {
+                    self.check_stmt(s)?;
+                }
+
+                // Verify Loop Safety (No moves of outer variables)
+                // We check: Did any variable that was alive at start become dead?
+                for (name, &was_alive) in &start_scope {
+                    if was_alive {
+                        // If it was alive start, it MUST be alive at the end of the body
+                        // otherwise we moved it inside a loop.
+                        let is_alive_after = *self.scope.get(name).unwrap_or(&false);
+
+                        if !is_alive_after {
+                            return Err(format!(
+                                "Borrow Error: Cannot move outer variable '{}' inside a loop.",
+                                name
+                            ));
+                        }
+                    }
+                }
+
+                // Reset Scope
+                // After the loop, the state is effectively the same as start
+                // (because we forbade moves), but variables defined INSIDE the loop die.
+                self.scope = start_scope;
+
+                Ok(())
+            }
         }
     }
 
@@ -95,7 +135,7 @@ impl BorrowChecker {
             Expr::Old(name) => {
                 // old(x) usually borrows, so we might check existence without killing?
                 // For safety, let's treat it as a read
-                if self.scope.get(name).is_some() {
+                if self.scope.contains_key(name) {
                     Ok(())
                 } else {
                     Err(format!("Undefined variable in old(): {}", name))
