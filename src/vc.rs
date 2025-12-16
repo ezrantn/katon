@@ -126,12 +126,12 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                     if v_then != v_start || v_else != v_start {
                         let merged = env.new_version(&var);
                         smt.push_str(&format!("(declare-const {} Int)\n", merged));
+                        let then_name = format!("{}_{}", var, v_then);
+                        let else_name = format!("{}_{}", var, v_else);
+
                         smt.push_str(&format!(
                             "(assert (= {} (ite {} {} {})))\n",
-                            merged,
-                            cond_smt,
-                            format!("{}_{}", var, v_then),
-                            format!("{}_{}", var, v_else)
+                            merged, cond_smt, then_name, else_name
                         ));
                     }
                 }
