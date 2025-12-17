@@ -141,7 +141,7 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 invariant,
                 body,
             } => {
-                // Assert Invariant holds on Entry 
+                // Assert Invariant holds on Entry
                 // Does the invariant hold BEFORE the loop starts?
                 let inv_entry = expr_to_smt(invariant, env);
                 smt.push_str("; CHECK 1: Loop Entry Invariant\n");

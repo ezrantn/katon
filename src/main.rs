@@ -1,8 +1,8 @@
 pub mod ast;
 pub mod check;
+pub mod codegen;
 pub mod runner;
 pub mod vc;
-pub mod codegen;
 
 use lalrpop_util::lalrpop_mod;
 
