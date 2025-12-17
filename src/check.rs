@@ -1,5 +1,8 @@
 // Implementation of affine types
-use crate::ast::{Expr, FnDecl, Op, Stmt, Type};
+use crate::{
+    ast::{Expr, FnDecl, Op, Stmt, Type},
+    error::CheckError,
+};
 use std::collections::HashMap;
 
 pub struct BorrowChecker {
@@ -111,10 +114,7 @@ impl BorrowChecker {
                     if *was_alive {
                         let (is_alive_after, _) = self.scope.get(name).unwrap();
                         if !is_alive_after {
-                            return Err(format!(
-                                "Borrow Error: Cannot move outer variable '{}' inside a loop.",
-                                name
-                            ));
+                            return Err(CheckError::UseAfterMove { var: name.clone() }.to_string());
                         }
                     }
                 }

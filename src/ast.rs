@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter, Result};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Add,
@@ -53,6 +55,15 @@ pub enum Type {
     Array(Box<Type>),
 }
 
+impl Display for Type {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            Type::Int => write!(f, "int"),
+            Type::Nat => write!(f, "nat"),
+            Type::Array(inner) => write!(f, "[{}]", inner),
+        }
+    }
+}
 pub struct FnDecl {
     pub name: String,
     pub params: Vec<(String, Type)>,
