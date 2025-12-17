@@ -141,7 +141,7 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 invariant,
                 body,
             } => {
-                // --- STEP 1: Assert Invariant holds on Entry ---
+                // Assert Invariant holds on Entry 
                 // Does the invariant hold BEFORE the loop starts?
                 let inv_entry = expr_to_smt(invariant, env);
                 smt.push_str("; CHECK 1: Loop Entry Invariant\n");
@@ -150,7 +150,6 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 smt.push_str("(check-sat)\n");
                 smt.push_str("(pop)\n");
 
-                // --- 2. HAVOC & SETUP ---
                 // Fast-forward to an arbitrary iteration
                 let modified = get_modified_vars(body);
                 for var in &modified {
@@ -162,7 +161,6 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 let inv_havoc = expr_to_smt(invariant, env);
                 smt.push_str(&format!("(assert {})\n", inv_havoc));
 
-                // --- 3. BODY CHECK ---
                 // If (Cond is True) AND (Body runs) -> Does Invariant still hold?
                 smt.push_str("; CHECK 2: Loop Body Maintenance\n");
                 smt.push_str("(push)\n");
@@ -177,6 +175,7 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                     global_gen: env.global_gen.clone(),
                     current_scope: env.current_scope.clone(),
                 };
+
                 process_block(body, &mut body_env, smt);
 
                 // C. Check Invariant Post-Body
@@ -185,7 +184,6 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
                 smt.push_str("(check-sat)\n");
                 smt.push_str("(pop)\n");
 
-                // --- 4. EXIT PATH ---
                 // Continue the main analysis assuming the Loop Condition is FALSE
                 let cond_exit = expr_to_smt(cond, env);
                 smt.push_str(&format!("(assert (not {}))\n", cond_exit));

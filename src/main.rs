@@ -2,10 +2,11 @@ pub mod ast;
 pub mod check;
 pub mod runner;
 pub mod vc;
+pub mod codegen;
 
 use lalrpop_util::lalrpop_mod;
 
-lalrpop_mod!(pub otter);
+lalrpop_mod!(pub katon);
 
 fn main() {
     // SOURCE CODE (Hardcoded for now, or read from args later)
@@ -23,10 +24,10 @@ fn main() {
         }
     "#;
 
-    println!("Compiling Otter program...");
+    println!("Compiling katon program...");
 
     // PARSE
-    let parser = otter::FnDeclParser::new();
+    let parser = katon::FnDeclParser::new();
     let parse_result = parser.parse(src);
 
     match parse_result {
@@ -74,7 +75,7 @@ fn main() {
 mod tests {
     use super::ast::{Expr, FnDecl, Op, Stmt};
     use super::check::BorrowChecker;
-    use super::otter;
+    use super::katon;
     use super::runner;
     use super::vc;
 
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_basic_arithmetic() {
-        let parser = otter::ExprParser::new();
+        let parser = katon::ExprParser::new();
 
         let res = parser.parse("1 + 2").unwrap();
         assert_eq!(res, bin(int(1), Op::Add, int(2)));
@@ -106,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_arithmetic_associativity() {
-        let parser = otter::ExprParser::new();
+        let parser = katon::ExprParser::new();
 
         // We use PEMDAS Logic to define arithmetic e.g 1 + (2 * 3)
         let res = parser.parse("1 + 2 * 3").unwrap();
@@ -119,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_factor_and_atoms() {
-        let parser = otter::ExprParser::new();
+        let parser = katon::ExprParser::new();
 
         assert_eq!(parser.parse("(123)").unwrap(), Expr::IntLit(123));
 
@@ -135,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_statements() {
-        let parser = otter::StmtParser::new();
+        let parser = katon::StmtParser::new();
 
         // Assignment
         let assign = parser.parse("x = 100").unwrap();
@@ -174,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_function_decl() {
-        let parser = otter::FnDeclParser::new();
+        let parser = katon::FnDeclParser::new();
 
         let code = r#"
             func transfer(from, to, amount) {
