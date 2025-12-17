@@ -39,22 +39,14 @@ impl Span {
         self.end - self.start
     }
 
+    // 0..0 is both empty and dummy
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    // 5..5 is empty but not dummy
     pub fn is_dummy(&self) -> bool {
         self.start == 0 && self.end == 0
-    }
-}
-
-impl fmt::Display for Span {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_dummy() {
-            write!(f, "<unknown>")
-        } else {
-            write!(f, "{}..{}", self.start, self.end)
-        }
     }
 }
 
@@ -107,7 +99,7 @@ impl fmt::Display for Diagnostic {
             CheckError::AssignToMoved { var } => {
                 write!(
                     f,
-                    "Borrow Error: Cannot assign to moved or uninitialized array '{}'\n at {:?}",
+                    "Borrow Error: Cannot assign to moved or uninitialized '{}'\n at {:?}",
                     var, self.span
                 )
             }
