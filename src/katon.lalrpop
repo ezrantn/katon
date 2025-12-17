@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use crate::ast::{Expr, FnDecl, Op, Stmt, Type};
+use crate::errors::{Spanned, Span};
 
 grammar;
 
@@ -18,44 +19,48 @@ pub Type: Type = {
 // ===========================================
 
 // Tier 1: Lowest precedence (Comparisons)
-pub Expr: Expr = {
-    <l:Expr> "==" <r:Term> => Expr::Binary(Box::new(l), Op::Eq, Box::new(r)),
-    <l:Expr> ">"  <r:Term> => Expr::Binary(Box::new(l), Op::Gt, Box::new(r)),
-    <l:Expr> "<"  <r:Term> => Expr::Binary(Box::new(l), Op::Lt, Box::new(r)),
-    <l:Expr> ">=" <r:Term> => Expr::Binary(Box::new(l), Op::Gte, Box::new(r)),
-    <l:Expr> "<=" <r:Term> => Expr::Binary(Box::new(l), Op::Lte, Box::new(r)),
+pub Expr: Spanned<Expr> = {
+    <l:@L> <lhs:Expr> "==" <rhs:Term> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Eq, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Expr> ">"  <rhs:Term> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Gt, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Expr> "<"  <rhs:Term> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Lt, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Expr> ">=" <rhs:Term> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Gte, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Expr> "<=" <rhs:Term> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Lte, Box::new(rhs)), Span::new(l, r)),
     Term,
 };
 
 // Tier 2: Arithmetic (+, -)
-pub Term: Expr = {
-    <l:Term> "+" <r:Product> => Expr::Binary(Box::new(l), Op::Add, Box::new(r)),
-    <l:Term> "-" <r:Product> => Expr::Binary(Box::new(l), Op::Sub, Box::new(r)),
+pub Term: Spanned<Expr> = {
+    <l:@L> <lhs:Term> "+" <rhs:Product> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Add, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Term> "-" <rhs:Product> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Sub, Box::new(rhs)), Span::new(l, r)),
     Product,
 };
 
-pub Product: Expr = {
-    <l:Product> "*" <r:Unary> => Expr::Binary(Box::new(l), Op::Mul, Box::new(r)),
-    <l:Product> "/" <r:Unary> => Expr::Binary(Box::new(l), Op::Div, Box::new(r)),
+pub Product: Spanned<Expr> = {
+    <l:@L> <lhs:Product> "*" <rhs:Unary> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Mul, Box::new(rhs)), Span::new(l, r)),
+    <l:@L> <lhs:Product> "/" <rhs:Unary> <r:@R> => Spanned::new(Expr::Binary(Box::new(lhs), Op::Div, Box::new(rhs)), Span::new(l, r)),
     Unary,
 };
 
-pub Unary: Expr = {
-    "-" <u:Unary> => Expr::Binary(Box::new(Expr::IntLit(0)), Op::Sub, Box::new(u)),
+pub Unary: Spanned<Expr> = {
+    <l:@L> "-" <u:Unary> <r:@R> => {
+        // Create a dummy 0 for the negation: 0 - u
+        let zero = Spanned::new(Expr::IntLit(0), Span::new(l, l)); 
+        Spanned::new(Expr::Binary(Box::new(zero), Op::Sub, Box::new(u)), Span::new(l, r))
+    },
     Factor,
 }
 
 // Tier 3: Highest precedence (Atoms)
-pub Factor: Expr = {
-    <base:Factor> "[" <idx:Expr> "]" => Expr::Binary(Box::new(base), Op::Index, Box::new(idx)),
+pub Factor: Spanned<Expr> = {
+    <l:@L> <base:Factor> "[" <idx:Expr> "]" <r:@R> => Spanned::new(Expr::Binary(Box::new(base), Op::Index, Box::new(idx)), Span::new(l, r)),
     Atom,
 };
 
-pub Atom: Expr = {
-    <i:Int> => Expr::IntLit(i),
-    <id:Ident> => Expr::Var(id),
-    <t:Type> "(" <e:Expr> ")" => Expr::Cast(t, Box::new(e)),
-    "old" "(" <id:Ident> ")" => Expr::Old(id),
+pub Atom: Spanned<Expr> = {
+    <l:@L> <i:Int> <r:@R> => Spanned::new(Expr::IntLit(i), Span::new(l, r)),
+    <l:@L> <id:Ident> <r:@R> => Spanned::new(Expr::Var(id), Span::new(l, r)),
+    <l:@L> <t:Type> "(" <e:Expr> ")" <r:@R> => Spanned::new(Expr::Cast(t, Box::new(e)), Span::new(l, r)),
+    <l:@L> "old" "(" <id:Ident> ")" <r:@R> => Spanned::new(Expr::Old(id), Span::new(l, r)),
     "(" <e:Expr> ")" => e,
 };
 
@@ -63,7 +68,11 @@ pub Atom: Expr = {
 // 2. Statements
 // ===========================================
 
-pub Stmt: Stmt = {
+pub Stmt: Spanned<Stmt> = {
+    <l:@L> <s:StmtKind> <r:@R> => Spanned::new(s, Span::new(l, r))
+};
+
+StmtKind: Stmt = {
     // Assignment: x = 5
     <id:Ident> "=" <e:Expr> => Stmt::Assign { target: id, value: e },
 
@@ -84,8 +93,9 @@ pub Stmt: Stmt = {
     },
 };
 
-// A block is just a list of statements wrapped in curly braces
-Block: Vec<Stmt> = {
+// Block now returns Vec<Spanned<Stmt>> automatically 
+// because Stmt returns Spanned<Stmt>
+Block: Vec<Spanned<Stmt>> = {
     "{" <s:Stmt*> "}" => s
 };
 
@@ -93,15 +103,14 @@ Block: Vec<Stmt> = {
 // 3. Function Declaration
 // ===========================================
 
-// Helper for "requires" and "ensures"
-Requires: Expr = "requires" <e:Expr> => e;
-Ensures: Expr = "ensures" <e:Expr> => e;
+// Requires and Ensures now expect Spanned<Expr> because 'Expr' rule returns it
+Requires: Spanned<Expr> = "requires" <e:Expr> => e;
+Ensures: Spanned<Expr> = "ensures" <e:Expr> => e;
 
 Param: (String, Type) = {
     <id:Ident> <t:Type> => (id, t)
 };
 
-// Comma separated identifiers: x, y, z
 Params: Vec<(String, Type)> = {
     <mut v:(<Param> ",")*> <e:Param?> => match e {
         None => v,
@@ -114,9 +123,9 @@ Params: Vec<(String, Type)> = {
 
 pub FnDecl: FnDecl = {
     "func" <name:Ident> "(" <params:Params> ")" "{" 
-        <req:Requires*>   // 0 or more 'requires'
-        <body:Stmt*>      // 0 or more statements
-        <ens:Ensures*>    // 0 or more 'ensures'
+        <req:Requires*>   // Vec<Spanned<Expr>>
+        <body:Stmt*>      // Vec<Spanned<Stmt>> (Fixed!)
+        <ens:Ensures*>    // Vec<Spanned<Expr>>
     "}" => FnDecl {
         name,
         params,
@@ -130,14 +139,12 @@ pub FnDecl: FnDecl = {
 // 4. Lexer / Terminals
 // ===========================================
 
-// Simple tokens
 Int: i64 = <s:r"[0-9]+"> => i64::from_str(s).unwrap();
 Ident: String = <s:r"[a-zA-Z_][a-zA-Z0-9_]*"> => s.to_string();
 
-// Ignore whitespace
 match {
-    r"\s*" => { }, // The default whitespace skipping
-    r"//[^\n\r]*[\n\r]*" => { }, // Skip comments
+    r"\s*" => { },
+    r"//[^\n\r]*[\n\r]*" => { },
 } else {
     _
 }

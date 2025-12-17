@@ -1,7 +1,7 @@
 pub mod ast;
 pub mod check;
 pub mod codegen;
-pub mod error;
+pub mod errors;
 pub mod runner;
 pub mod vc;
 
@@ -74,36 +74,64 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{Expr, FnDecl, Op, Stmt, Type};
+    use super::ast::{Expr, FnDecl, Op, SExpr, Stmt, Type};
     use super::check::BorrowChecker;
+    use super::errors::{CheckError, Span, Spanned};
     use super::katon;
     use super::runner;
     use super::vc;
 
-    fn int(i: i64) -> Box<Expr> {
-        Box::new(Expr::IntLit(i))
+    fn var(name: &str) -> SExpr {
+        Spanned::dummy(Expr::Var(name.to_string()))
     }
 
-    fn var(s: &str) -> Box<Expr> {
-        Box::new(Expr::Var(s.to_string()))
+    fn old(name: &str) -> SExpr {
+        Spanned::dummy(Expr::Old(name.to_string()))
     }
 
-    fn bin(l: Box<Expr>, op: Op, r: Box<Expr>) -> Expr {
-        Expr::Binary(l, op, r)
+    fn int(n: i64) -> SExpr {
+        Spanned::dummy(Expr::IntLit(n))
+    }
+
+    fn bool_lit(b: bool) -> SExpr {
+        Spanned::dummy(Expr::BoolLit(b))
+    }
+
+    fn bin(l: SExpr, op: Op, r: SExpr) -> SExpr {
+        Spanned::dummy(Expr::Binary(Box::new(l), op, Box::new(r)))
+    }
+
+    fn remove_spans(expr: &mut SExpr) {
+        // 1. Zero out the current span
+        expr.span = Span::dummy();
+
+        // 2. Recurse into children
+        match &mut expr.node {
+            Expr::Binary(lhs, _, rhs) => {
+                remove_spans(lhs); // Deref Box and recurse
+                remove_spans(rhs);
+            }
+            Expr::Cast(_, inner) => {
+                remove_spans(inner);
+            }
+            // Leaf nodes (IntLit, Var, etc.) have no children to clean
+            _ => {}
+        }
     }
 
     #[test]
     fn test_basic_arithmetic() {
         let parser = katon::ExprParser::new();
 
-        let res = parser.parse("1 + 2").unwrap();
+        // Test 1: "1 + 2"
+        let mut res = parser.parse("1 + 2").unwrap();
+        remove_spans(&mut res); // <--- Normalize the spans
         assert_eq!(res, bin(int(1), Op::Add, int(2)));
 
-        let res = parser.parse("x == 1 + 2").unwrap();
-        assert_eq!(
-            res,
-            bin(var("x"), Op::Eq, Box::new(bin(int(1), Op::Add, int(2))))
-        );
+        // Test 2: "x == 1 + 2"
+        let mut res = parser.parse("x == 1 + 2").unwrap();
+        remove_spans(&mut res); // <--- Normalize the spans
+        assert_eq!(res, bin(var("x"), Op::Eq, bin(int(1), Op::Add, int(2))));
     }
 
     #[test]
@@ -111,28 +139,36 @@ mod tests {
         let parser = katon::ExprParser::new();
 
         // We use PEMDAS Logic to define arithmetic e.g 1 + (2 * 3)
-        let res = parser.parse("1 + 2 * 3").unwrap();
+        let mut res = parser.parse("1 + 2 * 3").unwrap();
+        remove_spans(&mut res);
 
-        assert_eq!(
-            res,
-            bin(int(1), Op::Add, Box::new(bin(int(2), Op::Mul, int(3))))
-        );
+        assert_eq!(res, bin(int(1), Op::Add, bin(int(2), Op::Mul, int(3))));
     }
 
     #[test]
     fn test_factor_and_atoms() {
         let parser = katon::ExprParser::new();
 
-        assert_eq!(parser.parse("(123)").unwrap(), Expr::IntLit(123));
+        // Compare only the .node
+        let res = parser.parse("(123)").unwrap();
+        assert_eq!(res.node, int(123).node);
 
-        // Negative numbers (unary minus)
-        // "-5" parses as "0 - 5" based on the grammar rule: "-" <f:Factor> => 0 - f
-        assert_eq!(parser.parse("-5").unwrap(), bin(int(0), Op::Sub, int(5)));
+        // Deep comparison will fail due to nested Spans.
+        // We verify structure manually instead of using assert_eq! on the whole tree.
+        let neg = parser.parse("-5").unwrap();
+        match neg.node {
+            Expr::Binary(lhs, op, rhs) => {
+                // Check 0 - 5
+                assert_eq!(lhs.node, Expr::IntLit(0)); // Check inner .node
+                assert_eq!(op, Op::Sub);
+                assert_eq!(rhs.node, Expr::IntLit(5)); // Check inner .node
+            }
+            _ => panic!("Expected Binary expression for -5, got {:?}", neg),
+        }
 
-        assert_eq!(
-            parser.parse("old(balance)").unwrap(),
-            Expr::Old("balance".to_string())
-        );
+        // Compare only the .node
+        let old_res = parser.parse("old(balance)").unwrap();
+        assert_eq!(old_res.node, old("balance").node);
     }
 
     #[test]
@@ -141,23 +177,29 @@ mod tests {
 
         // Assignment
         let assign = parser.parse("x = 100").unwrap();
-        match assign {
+        match assign.node {
             Stmt::Assign { target, value } => {
                 assert_eq!(target, "x");
-                assert_eq!(value, Expr::IntLit(100));
+                assert_eq!(value.node, int(100).node);
             }
             _ => panic!("Expected Assign"),
         }
 
         // If-Else
         let if_stmt = parser.parse("if x > 0 { y = 1 } else { y = 2 }").unwrap();
-        match if_stmt {
+        match if_stmt.node {
             Stmt::If {
                 cond,
                 then_block,
                 else_block,
             } => {
-                assert!(matches!(cond, Expr::Binary(..)));
+                assert!(matches!(
+                    cond,
+                    Spanned {
+                        node: Expr::Binary(..),
+                        ..
+                    }
+                ));
                 assert_eq!(then_block.len(), 1);
                 assert_eq!(else_block.len(), 1);
             }
@@ -166,7 +208,7 @@ mod tests {
 
         // If without Else (should have empty else_block)
         let if_only = parser.parse("if x > 0 { y = 1 }").unwrap();
-        match if_only {
+        match if_only.node {
             Stmt::If { else_block, .. } => {
                 assert!(else_block.is_empty());
             }
@@ -222,10 +264,10 @@ mod tests {
                 bin(var("x"), Op::Gt, int(10)),
                 bin(var("x"), Op::Lt, int(5)),
             ],
-            body: vec![Stmt::Assign {
+            body: vec![Spanned::dummy(Stmt::Assign {
                 target: "x".to_string(),
-                value: Expr::IntLit(99999),
-            }],
+                value: int(99999),
+            })],
             ensures: vec![bin(var("x"), Op::Eq, int(0))],
         };
 
@@ -256,20 +298,20 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Stmt::If {
+                Spanned::dummy(Stmt::If {
                     cond: bin(var("c"), Op::Gt, int(0)),
-                    then_block: vec![Stmt::Assign {
+                    then_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "y".to_string(),
-                        value: Expr::IntLit(50),
-                    }],
+                        value: int(50),
+                    })],
                     else_block: vec![
                         // Empty else
                     ],
-                },
-                Stmt::Assign {
+                }),
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: bin(var("y"), Op::Add, int(1)),
-                },
+                }),
             ],
         };
 
@@ -281,7 +323,14 @@ mod tests {
             result.is_err(),
             "Borrow checker failed to catch uninitialized merge."
         );
-        assert!(result.unwrap_err().contains("Borrow Error:"));
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error,
+            CheckError::UndefinedVariable {
+                var: "y".to_string()
+            }
+        );
     }
 
     #[test]
@@ -299,24 +348,24 @@ mod tests {
             name: "Nested".to_string(),
             params: vec![("x".to_string(), Type::Int)],
             requires: vec![],
-            body: vec![Stmt::If {
-                cond: Expr::BoolLit(true),
-                then_block: vec![Stmt::If {
-                    cond: Expr::BoolLit(true),
-                    then_block: vec![Stmt::Assign {
+            body: vec![Spanned::dummy(Stmt::If {
+                cond: bool_lit(true),
+                then_block: vec![Spanned::dummy(Stmt::If {
+                    cond: bool_lit(true),
+                    then_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "x".to_string(),
-                        value: Expr::IntLit(1),
-                    }],
-                    else_block: vec![Stmt::Assign {
+                        value: int(1),
+                    })],
+                    else_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "x".to_string(),
-                        value: Expr::IntLit(2),
-                    }],
-                }],
-                else_block: vec![Stmt::Assign {
+                        value: int(2),
+                    })],
+                })],
+                else_block: vec![Spanned::dummy(Stmt::Assign {
                     target: "x".to_string(),
-                    value: Expr::IntLit(3),
-                }],
-            }],
+                    value: int(3),
+                })],
+            })],
             ensures: vec![bin(var("x"), Op::Eq, int(1))],
         };
 
@@ -341,14 +390,14 @@ mod tests {
             params: vec![("x".to_string(), Type::Int)],
             requires: vec![bin(var("x"), Op::Gt, int(0))],
             body: vec![
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "y".to_string(),
                     value: bin(var("x"), Op::Mul, var("x")),
-                },
-                Stmt::Assign {
+                }),
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: bin(var("y"), Op::Div, var("x")),
-                },
+                }),
             ],
             ensures: vec![bin(var("z"), Op::Eq, var("x"))],
         };
@@ -375,18 +424,18 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "x".to_string(),
-                    value: Expr::IntLit(0),
-                },
-                Stmt::While {
+                    value: int(0),
+                }),
+                Spanned::dummy(Stmt::While {
                     cond: bin(var("x"), Op::Lt, int(100)),
                     invariant: bin(var("x"), Op::Gt, int(10)), // 0 > 10 is False
-                    body: vec![Stmt::Assign {
+                    body: vec![Spanned::dummy(Stmt::Assign {
                         target: "x".to_string(),
                         value: bin(var("x"), Op::Add, int(1)),
-                    }],
-                },
+                    })],
+                }),
             ],
         };
 

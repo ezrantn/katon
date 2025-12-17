@@ -1,4 +1,8 @@
+use crate::errors::Spanned;
 use std::fmt::{Display, Formatter, Result};
+
+pub type SExpr = Spanned<Expr>;
+pub type SStmt = Spanned<Stmt>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -20,31 +24,31 @@ pub enum Expr {
     IntLit(i64),
     BoolLit(bool),
     Var(String),
-    Old(String), // The "old(x)" operator
-    Binary(Box<Expr>, Op, Box<Expr>),
-    Cast(Type, Box<Expr>),
+    Old(String),
+    Binary(Box<SExpr>, Op, Box<SExpr>),
+    Cast(Type, Box<SExpr>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign {
         target: String,
-        value: Expr,
+        value: SExpr,
     },
     If {
-        cond: Expr,
-        then_block: Vec<Stmt>,
-        else_block: Vec<Stmt>,
+        cond: SExpr,
+        then_block: Vec<SStmt>,
+        else_block: Vec<SStmt>,
     },
     While {
-        cond: Expr,
-        invariant: Expr, // The user MUST use invariant for now
-        body: Vec<Stmt>,
+        cond: SExpr,
+        invariant: SExpr, // The user MUST use invariant for now
+        body: Vec<SStmt>,
     },
     ArrayUpdate {
         target: String,
-        index: Expr,
-        value: Expr,
+        index: SExpr,
+        value: SExpr,
     },
 }
 
@@ -67,7 +71,7 @@ impl Display for Type {
 pub struct FnDecl {
     pub name: String,
     pub params: Vec<(String, Type)>,
-    pub requires: Vec<Expr>,
-    pub ensures: Vec<Expr>,
-    pub body: Vec<Stmt>,
+    pub requires: Vec<SExpr>,
+    pub ensures: Vec<SExpr>,
+    pub body: Vec<SStmt>,
 }

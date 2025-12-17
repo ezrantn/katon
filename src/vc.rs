@@ -1,4 +1,4 @@
-use crate::ast::{Expr, FnDecl, Op, Stmt, Type};
+use crate::ast::{Expr, FnDecl, Op, SExpr, SStmt, Stmt, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Env {
@@ -47,8 +47,8 @@ impl Env {
     }
 }
 
-fn expr_to_smt(expr: &Expr, env: &Env) -> String {
-    match expr {
+fn expr_to_smt(expr: &SExpr, env: &Env) -> String {
+    match &expr.node {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         Expr::Var(name) => env.get(name),
@@ -75,10 +75,10 @@ fn expr_to_smt(expr: &Expr, env: &Env) -> String {
     }
 }
 
-fn get_modified_vars(stmts: &[Stmt]) -> Vec<String> {
+fn get_modified_vars(stmts: &[SStmt]) -> Vec<String> {
     let mut vars = Vec::new();
     for stmt in stmts {
-        match stmt {
+        match &stmt.node {
             Stmt::Assign { target, .. } => vars.push(target.clone()),
             Stmt::If {
                 then_block,
@@ -107,9 +107,9 @@ fn type_to_smt(ty: &Type) -> String {
     }
 }
 
-fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
+fn process_block(stmts: &[SStmt], env: &mut Env, smt: &mut String) {
     for stmt in stmts {
-        match stmt {
+        match &stmt.node {
             Stmt::Assign { target, value } => {
                 let val_smt = expr_to_smt(value, env);
 
@@ -172,7 +172,13 @@ fn process_block(stmts: &[Stmt], env: &mut Env, smt: &mut String) {
 
                     if v_then != v_start || v_else != v_start {
                         let merged = env.new_version(&var);
-                        smt.push_str(&format!("(declare-const {} Int)\n", merged));
+                        let ty_smt = if let Some(ty) = env.var_types.get(&var) {
+                            type_to_smt(ty)
+                        } else {
+                            "Int".to_string()
+                        };
+
+                        smt.push_str(&format!("(declare-const {} {})\n", merged, ty_smt));
                         let then_name = format!("{}_{}", var, v_then);
                         let else_name = format!("{}_{}", var, v_else);
 
@@ -319,18 +325,23 @@ pub fn compile(func: &FnDecl) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::Spanned;
     use crate::runner::verify_with_z3;
 
-    fn var(s: &str) -> Box<Expr> {
-        Box::new(Expr::Var(s.to_string()))
+    fn var(name: &str) -> SExpr {
+        Spanned::dummy(Expr::Var(name.to_string()))
     }
 
-    fn int(i: i64) -> Box<Expr> {
-        Box::new(Expr::IntLit(i))
+    fn old(name: &str) -> SExpr {
+        Spanned::dummy(Expr::Old(name.to_string()))
     }
 
-    fn bin(l: Box<Expr>, op: Op, r: Box<Expr>) -> Expr {
-        Expr::Binary(l, op, r)
+    fn int(n: i64) -> SExpr {
+        Spanned::dummy(Expr::IntLit(n))
+    }
+
+    fn bin(l: SExpr, op: Op, r: SExpr) -> SExpr {
+        Spanned::dummy(Expr::Binary(Box::new(l), op, Box::new(r)))
     }
 
     #[test]
@@ -353,28 +364,28 @@ mod tests {
             requires: vec![],
             body: vec![
                 // 1. Init y = x
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "y".to_string(),
-                    value: Expr::Var("x".to_string()),
-                },
+                    value: var("x"),
+                }),
                 // 2. If x < 0
-                Stmt::If {
+                Spanned::dummy(Stmt::If {
                     cond: bin(var("x"), Op::Lt, int(0)),
                     then_block: vec![
                         // y = 0 - x
-                        Stmt::Assign {
+                        Spanned::dummy(Stmt::Assign {
                             target: "y".to_string(),
                             value: bin(int(0), Op::Sub, var("x")),
-                        },
+                        }),
                     ],
                     else_block: vec![
                         // y = x
-                        Stmt::Assign {
+                        Spanned::dummy(Stmt::Assign {
                             target: "y".to_string(),
-                            value: Expr::Var("x".to_string()),
-                        },
+                            value: var("x"),
+                        }),
                     ],
-                },
+                }),
             ],
             ensures: vec![
                 // y >= 0
@@ -432,21 +443,21 @@ mod tests {
             params: vec![("n".to_string(), Type::Int)],
             requires: vec![bin(var("n"), Op::Gt, int(0))],
             body: vec![
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "i".to_string(),
-                    value: Expr::IntLit(0),
-                },
-                Stmt::While {
+                    value: int(0),
+                }),
+                Spanned::dummy(Stmt::While {
                     cond: bin(var("i"), Op::Lt, var("n")),
                     invariant: bin(var("i"), Op::Gte, int(0)), // i must stay positive
                     body: vec![
                         // BUG: Decrementing i makes it negative!
-                        Stmt::Assign {
+                        Spanned::dummy(Stmt::Assign {
                             target: "i".to_string(),
                             value: bin(var("i"), Op::Sub, int(1)),
-                        },
+                        }),
                     ],
-                },
+                }),
             ],
             ensures: vec![],
         };
@@ -471,27 +482,19 @@ mod tests {
             name: "update".to_string(),
             params: vec![("arr".to_string(), Type::Array(Box::new(Type::Int)))],
             requires: vec![],
-            body: vec![Stmt::ArrayUpdate {
+            body: vec![Spanned::dummy(Stmt::ArrayUpdate {
                 target: "arr".to_string(),
-                index: Expr::IntLit(0),
-                value: Expr::IntLit(99),
-            }],
+                index: int(0),
+                value: int(99),
+            })],
             ensures: vec![
                 // arr[0] == 99
-                bin(
-                    Box::new(bin(var("arr"), Op::Index, int(0))),
-                    Op::Eq,
-                    int(99),
-                ),
+                bin(bin(var("arr"), Op::Index, int(0)), Op::Eq, int(99)),
                 // arr[1] == old(arr)[1] (Prove we didn't touch index 1)
                 bin(
-                    Box::new(bin(var("arr"), Op::Index, int(1))),
+                    bin(var("arr"), Op::Index, int(1)),
                     Op::Eq,
-                    Box::new(Expr::Binary(
-                        Box::new(Expr::Old("arr".to_string())),
-                        Op::Index,
-                        int(1),
-                    )),
+                    bin(old("arr"), Op::Index, int(1)),
                 ),
             ],
         };

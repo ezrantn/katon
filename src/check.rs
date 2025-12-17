@@ -1,7 +1,7 @@
 // Implementation of affine types
 use crate::{
-    ast::{Expr, FnDecl, Op, Stmt, Type},
-    error::CheckError,
+    ast::{Expr, FnDecl, Op, SExpr, SStmt, Stmt, Type},
+    errors::{CheckError, Diagnostic},
 };
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ impl BorrowChecker {
         }
     }
 
-    pub fn check_fn(&mut self, func: &FnDecl) -> Result<(), String> {
+    pub fn check_fn(&mut self, func: &FnDecl) -> Result<(), Diagnostic> {
         // Initialize args as Alive
         // Register variable as Alive with its Type
         for (name, ty) in &func.params {
@@ -44,8 +44,8 @@ impl BorrowChecker {
         }
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
-        match stmt {
+    fn check_stmt(&mut self, stmt: &SStmt) -> Result<(), Diagnostic> {
+        match &stmt.node {
             Stmt::Assign { target, value } => {
                 // Check RHS first (Use)
                 self.check_expr(value)?;
@@ -62,6 +62,7 @@ impl BorrowChecker {
                     // Ideally, Katon AST needs type inference here.
                     self.scope.insert(target.clone(), (true, Type::Int));
                 }
+
                 Ok(())
             }
             Stmt::If {
@@ -114,7 +115,10 @@ impl BorrowChecker {
                     if *was_alive {
                         let (is_alive_after, _) = self.scope.get(name).unwrap();
                         if !is_alive_after {
-                            return Err(CheckError::UseAfterMove { var: name.clone() }.to_string());
+                            return Err(Diagnostic {
+                                error: CheckError::UseAfterMove { var: name.clone() },
+                                span: stmt.span,
+                            });
                         }
                     }
                 }
@@ -141,18 +145,30 @@ impl BorrowChecker {
                 if let Some((is_alive, ty)) = self.scope.get(target) {
                     // Rule: Katon cannot modify a moved array
                     if !is_alive {
-                        return Err(format!(
-                            "Borrow Error: Cannot assign to moved or uninitialized array '{}'.",
-                            target
-                        ));
+                        return Err(Diagnostic {
+                            error: CheckError::AssignToMoved {
+                                var: target.clone(),
+                            },
+                            span: stmt.span,
+                        });
                     }
 
                     // Rule: Must actually be an Array type
                     if !matches!(ty, Type::Array(_)) {
-                        return Err(format!("Type Error: '{}' is not an array.", target));
+                        return Err(Diagnostic {
+                            error: CheckError::InvalidIndex {
+                                base_ty: ty.clone(),
+                            },
+                            span: stmt.span,
+                        });
                     }
                 } else {
-                    return Err(format!("Borrow Error: Undefined variable '{}'.", target));
+                    return Err(Diagnostic {
+                        error: CheckError::UndefinedVariable {
+                            var: target.clone(),
+                        },
+                        span: stmt.span,
+                    });
                 }
 
                 Ok(())
@@ -160,12 +176,15 @@ impl BorrowChecker {
         }
     }
 
-    fn check_expr(&mut self, expr: &Expr) -> Result<(), String> {
-        match expr {
+    fn check_expr(&mut self, expr: &SExpr) -> Result<(), Diagnostic> {
+        match &expr.node {
             Expr::Var(name) => {
                 if let Some((is_alive, ty)) = self.scope.get(name).cloned() {
                     if !is_alive {
-                        return Err(format!("Borrow Error: Use of moved value: {}", name));
+                        return Err(Diagnostic {
+                            error: CheckError::UseAfterMove { var: name.clone() },
+                            span: expr.span,
+                        });
                     }
 
                     // Only "Kill" if NOT Copy
@@ -174,7 +193,10 @@ impl BorrowChecker {
                     }
                     Ok(())
                 } else {
-                    Err(format!("Borrow Error: Undefined variable: {}", name))
+                    Err(Diagnostic {
+                        error: CheckError::UndefinedVariable { var: name.clone() },
+                        span: expr.span,
+                    })
                 }
             }
             Expr::Cast(_, inner) => self.check_expr(inner),
@@ -184,19 +206,28 @@ impl BorrowChecker {
 
                 // 2. Check the Array (lhs) carefully
                 // If lhs is a variable, we peek at it without killing it
-                if let Expr::Var(name) = &**lhs
-                    && let Some((is_alive, _)) = self.scope.get(name)
-                {
-                    if !is_alive {
-                        return Err(format!("Borrow Error: Use of moved value: {}", name));
+                match &lhs.node {
+                    Expr::Var(name) => {
+                        match self.scope.get(name) {
+                            Some((is_alive, _ty)) => {
+                                if !is_alive {
+                                    return Err(Diagnostic {
+                                        error: CheckError::UseAfterMove { var: name.clone() },
+                                        span: lhs.span,
+                                    });
+                                }
+                                // DO NOT kill — indexing is a borrow
+                                Ok(())
+                            }
+                            None => Err(Diagnostic {
+                                error: CheckError::UndefinedVariable { var: name.clone() },
+                                span: lhs.span,
+                            }),
+                        }
                     }
-
-                    // DO NOT insert(false) here. Indexing borrows, it doesn't consume.
-                    return Ok(());
+                    // If lhs is complex (e.g. arr_factory()[0]), process recursively
+                    _ => self.check_expr(lhs),
                 }
-
-                // If lhs is complex (e.g. arr_factory()[0]), process recursively
-                self.check_expr(lhs)
             }
             Expr::Binary(l, _, r) => {
                 // Order matters! Left is evaluated/moved first.
@@ -209,7 +240,10 @@ impl BorrowChecker {
                 if self.scope.contains_key(name) {
                     Ok(())
                 } else {
-                    Err(format!("Undefined variable in old(): {}", name))
+                    Err(Diagnostic {
+                        error: CheckError::UndefinedVariable { var: name.clone() },
+                        span: expr.span,
+                    })
                 }
             }
             _ => Ok(()),
@@ -240,20 +274,27 @@ impl BorrowChecker {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Op, Type};
+    use crate::{
+        ast::{Op, Type},
+        errors::Spanned,
+    };
 
     use super::*;
 
-    fn var(n: &str) -> Expr {
-        Expr::Var(n.to_string())
+    fn var(name: &str) -> SExpr {
+        Spanned::dummy(Expr::Var(name.to_string()))
     }
 
-    fn int(n: i64) -> Expr {
-        Expr::IntLit(n)
+    fn int(n: i64) -> SExpr {
+        Spanned::dummy(Expr::IntLit(n))
     }
 
-    fn bin(l: Expr, op: Op, r: Expr) -> Expr {
-        Expr::Binary(Box::new(l), op, Box::new(r))
+    fn bool_lit(b: bool) -> SExpr {
+        Spanned::dummy(Expr::BoolLit(b))
+    }
+
+    fn bin(l: SExpr, op: Op, r: SExpr) -> SExpr {
+        Spanned::dummy(Expr::Binary(Box::new(l), op, Box::new(r)))
     }
 
     #[test]
@@ -276,18 +317,18 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Stmt::If {
-                    cond: Expr::BoolLit(true),
-                    then_block: vec![Stmt::Assign {
+                Spanned::dummy(Stmt::If {
+                    cond: bool_lit(true),
+                    then_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "y".to_string(),
                         value: var("x"),
-                    }],
+                    })],
                     else_block: vec![],
-                },
-                Stmt::Assign {
+                }),
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: var("x"),
-                },
+                }),
             ],
         };
 
@@ -315,15 +356,15 @@ mod tests {
             ensures: vec![],
             body: vec![
                 // 1. Test Int Copy: z = x + x
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: bin(var("x"), Op::Add, var("x")),
-                },
+                }),
                 // 2. Test Nat Copy: w = y * y
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "w".to_string(),
                     value: bin(var("y"), Op::Mul, var("y")),
-                },
+                }),
             ],
         };
 
@@ -352,25 +393,32 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Stmt::If {
+                Spanned::dummy(Stmt::If {
                     cond: bin(var("x"), Op::Gt, int(0)),
-                    then_block: vec![Stmt::Assign {
+                    then_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "y".to_string(),
                         value: int(10),
-                    }],
+                    })],
                     else_block: vec![],
-                },
+                }),
                 // The illegal access
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: var("y"),
-                },
+                }),
             ],
         };
 
         let result = bc.check_fn(&func);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Borrow Error: Undefined variable: y");
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error,
+            CheckError::UndefinedVariable {
+                var: "y".to_string()
+            }
+        );
     }
 
     #[test]
@@ -394,22 +442,22 @@ mod tests {
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Stmt::If {
+                Spanned::dummy(Stmt::If {
                     cond: bin(var("cond"), Op::Gt, int(0)),
-                    then_block: vec![Stmt::Assign {
+                    then_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "y".to_string(),
                         value: int(1),
-                    }],
-                    else_block: vec![Stmt::Assign {
+                    })],
+                    else_block: vec![Spanned::dummy(Stmt::Assign {
                         target: "y".to_string(),
                         value: int(2),
-                    }],
-                },
+                    })],
+                }),
                 // Should succeed because 'y' exists in both paths
-                Stmt::Assign {
+                Spanned::dummy(Stmt::Assign {
                     target: "z".to_string(),
                     value: var("y"),
-                },
+                }),
             ],
         };
 
@@ -429,18 +477,16 @@ mod tests {
             params: vec![], // No params
             requires: vec![],
             ensures: vec![],
-            body: vec![Stmt::Assign {
+            body: vec![Spanned::dummy(Stmt::Assign {
                 target: "z".to_string(),
                 value: var("unknown_var"),
-            }],
+            })],
         };
 
         let result = bc.check_fn(&func);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("Undefined variable: unknown_var")
-        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Variable 'unknown_var' undefined"));
     }
 }
