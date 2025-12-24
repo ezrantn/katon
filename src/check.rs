@@ -66,15 +66,16 @@ impl BorrowChecker {
 
                 // Mark as alive in current dataflow scope
                 self.scope.insert(id, (true, ty));
-
-                // Store the name so we can print "Variable 'x' is moved" later
                 self.id_to_name.insert(id, target.clone());
                 Ok(())
             }
             Stmt::Let { name, value, id } => {
-                self.check_expr(value, tcx)?;
-
                 let id = id.expect("Resolver should have assigned ID");
+
+                // Only check the expression if it exists (Value is Some)
+                if let Some(expr) = value {
+                    self.check_expr(expr, tcx)?; // Pass the inner SExpr
+                }
 
                 let ty = tcx
                     .node_types
@@ -82,9 +83,12 @@ impl BorrowChecker {
                     .expect("TypeChecker must run before BorrowChecker")
                     .clone();
 
-                self.scope.insert(id, (true, ty));
-                self.id_to_name.insert(id, name.clone());
+                // If value is Some, it's alive (true).
+                // If value is None, it is NOT alive (false) until the first Assign.
+                let is_initialized = value.is_some();
+                self.scope.insert(id, (is_initialized, ty));
 
+                self.id_to_name.insert(id, name.clone());
                 Ok(())
             }
             Stmt::If {

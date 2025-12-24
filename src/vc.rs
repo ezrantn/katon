@@ -95,6 +95,18 @@ fn expr_to_smt(expr: &SExpr, env: &Env, tcx: &TyCtx, smt: &mut String) -> String
                 _ => unimplemented!("Operator {:?} not implemented in SMT gen", op),
             }
         }
+        Expr::ArrayLit(elems) => {
+            let mut current_array = format!("((as const (Array Int Int)) 0)");
+            for (i, elem) in elems.iter().enumerate() {
+                let val_smt = expr_to_smt(elem, env, tcx, smt);
+                current_array = format!("(store {} {} {})", current_array, i, val_smt);
+            }
+
+            // TODO:
+            // In a real system, we'd need a way to pass the literal's
+            // length (elems.len()) to the logic checking .length()
+            current_array
+        }
         _ => unimplemented!(),
     }
 }
@@ -171,30 +183,39 @@ fn process_block(stmts: &[SStmt], env: Env, smt: &mut String, tcx: &TyCtx) -> En
                 env = env2;
             }
             Stmt::Let { value, id, .. } => {
-                let id = id.unwrap();
-                let val_smt = expr_to_smt(value, &env, tcx, smt);
-                let ty_obj = env.var_types.get(&id).unwrap();
+                let id = id.expect("Resolver must assign ID");
+                let ty_obj = env.var_types.get(&id).expect("Type missing in env");
 
-                // Is the initial value valid for a Nat?
-                if matches!(ty_obj, Type::Nat) {
-                    smt.push_str("; Safety Check: Nat Declaration\n(push)\n");
-                    smt.push_str(&format!("(assert (not (>= {} 0)))\n", val_smt));
-                    smt.push_str("(check-sat)\n(pop)\n");
+                if let Some(expr) = value {
+                    let val_smt = expr_to_smt(expr, &env, tcx, smt);
+
+                    // Safety Check: Nat Declaration
+                    if matches!(ty_obj, Type::Nat) {
+                        smt.push_str("; Safety Check: Nat Declaration\n(push)\n");
+                        smt.push_str(&format!("(assert (not (>= {} 0)))\n", val_smt));
+                        smt.push_str("(check-sat)\n(pop)\n");
+                    }
+
+                    // Standard SSA assignment logic
+                    let mut gens = env.gens.borrow_mut();
+                    let v = gens.entry(id).or_insert(0);
+                    *v += 1;
+                    let ver = *v;
+                    env.versions.insert(id, ver);
+
+                    let name = format!("{}_{}", tcx.get_name(&id), ver);
+                    smt.push_str(&format!(
+                        "(declare-const {} {})\n",
+                        name,
+                        type_to_smt(ty_obj)
+                    ));
+                    smt.push_str(&format!("(assert (= {} {}))\n", name, val_smt));
+                } else {
+                    // --- CASE: let x: type; ---
+                    // We don't declare a version yet (version remains 0).
+                    // We just ensure the type is registered in the env (already done by compile()).
+                    // This variable is now "known" but has no SMT identity until Assigned.
                 }
-
-                let mut gens = env.gens.borrow_mut();
-                let v = gens.entry(id).or_insert(0);
-                *v += 1;
-                let ver = *v;
-                env.versions.insert(id, ver);
-
-                let name = format!("{}_{}", tcx.get_name(&id), ver);
-                smt.push_str(&format!(
-                    "(declare-const {} {})\n",
-                    name,
-                    type_to_smt(ty_obj)
-                ));
-                smt.push_str(&format!("(assert (= {} {}))\n", name, val_smt));
             }
             Stmt::If {
                 cond,

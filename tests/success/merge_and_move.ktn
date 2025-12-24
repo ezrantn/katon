@@ -1,0 +1,15 @@
+func main(a: [int], cond: bool) {
+    let b = a; // 'a' moved to 'b'
+    let c: [int];
+    
+    if cond {
+        c = b; // 'b' moved to 'c'
+    } else {
+        c = [1, 2, 3]; // 'b' still valid in this branch scope, but not used
+    }
+    
+    // VCGen must handle the merge of 'c' (either b or the literal)
+    // Borrow Checker must ensure 'a' and 'b' are NOT used here.
+    let len = c_length;
+    ensures len >= 0;
+}

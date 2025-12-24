@@ -11,6 +11,7 @@ grammar;
 pub Type: Type = {
     "int" => Type::Int,
     "nat" => Type::Nat,
+    "bool" => Type::Bool,
     "[" <t:Type> "]" => Type::Array(Box::new(t)),
 };
 
@@ -67,6 +68,18 @@ Unary: Spanned<Expr> = {
 Postfix: Spanned<Expr> = {
     <l:@L> <base:Postfix> "[" <idx:Expr> "]" <r:@R> =>
         Spanned::new(Expr::Binary(Box::new(base), Op::Index, Box::new(idx)), Span::new(l, r)),
+    
+    <l:@L> <base:Postfix> "." "length" "(" ")" <r:@R> => {
+        // We can map this to a special Variable or a new Expr variant
+        // For now, let's map it to the "var_length" naming convention 
+        // our VCGen already uses.
+        if let Expr::Var(ref name, _) = base.node {
+             Spanned::new(Expr::Var(format!("{}_length", name), None), Span::new(l, r))
+        } else {
+             // Handle complex expressions if needed, or just allow it on Vars
+             panic!("length() only supported on variables currently")
+        }
+    },
     Atom,
 };
 
@@ -80,6 +93,17 @@ Atom: Spanned<Expr> = {
     <l:@L> "old" "(" <id:Ident> ")" <r:@R> =>
         Spanned::new(Expr::Old(id, None), Span::new(l, r)),
     "(" <e:Expr> ")" => e,
+    "true" => Spanned::dummy(Expr::BoolLit(true)),
+    "false" => Spanned::dummy(Expr::BoolLit(false)),
+    <l:@L> "[" <elems:Comma<Expr>> "]" <r:@R> => 
+        Spanned::new(Expr::ArrayLit(elems), Span::new(l, r)),
+};
+
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => { v.push(e); v }
+    }
 };
 
 // ===========================================
@@ -95,9 +119,17 @@ pub Stmt: Spanned<Stmt> = {
 };
 
 StmtKind: Stmt = {
+    // 1. let x = 5; (Inferred/Immediate)
     "let" <id:Ident> "=" <e:Expr> => Stmt::Let {
         name: id,
-        value: e,
+        value: Some(e),
+        id: None,
+    },
+
+    // 2. let x: int; (Declaration only)
+    "let" <id:Ident> ":" <t:Type> => Stmt::Let {
+        name: id,
+        value: None,
         id: None,
     },
 

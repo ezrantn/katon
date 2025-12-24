@@ -67,9 +67,26 @@ impl<'a> TypeChecker<'a> {
     fn check_stmt(&mut self, stmt: &SStmt) -> Result<(), Diagnostic> {
         match &stmt.node {
             Stmt::Let { value, id, .. } => {
-                let ty = self.check_expr(value)?;
                 let id = id.expect("Resolver must assign ID");
-                self.tcx.node_types.insert(id, ty);
+
+                match value {
+                    Some(expr) => {
+                        // Inference: let x = 5;
+                        let ty = self.check_expr(expr)?;
+                        self.tcx.node_types.insert(id, ty);
+                    }
+                    None => {
+                        // Declaration: let x: int;
+                        // The Resolver should have already put the type in node_types
+                        // based on the `: Type` syntax in the grammar.
+                        if !self.tcx.node_types.contains_key(&id) {
+                            return Err(self.type_error(
+                                "variable declaration lacks type annotation",
+                                stmt.span,
+                            ));
+                        }
+                    }
+                }
                 Ok(())
             }
             Stmt::Assign {
@@ -228,6 +245,27 @@ impl<'a> TypeChecker<'a> {
                     Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Gte | Op::Lte => Type::Bool,
                     _ => lt,
                 }
+            }
+            Expr::ArrayLit(elems) => {
+                if elems.is_empty() {
+                    return Ok(Type::Array(Box::new(Type::Int)));
+                }
+
+                let first_ty = self.check_expr(&elems[0])?;
+                for (_i, elem) in elems.iter().enumerate().skip(1) {
+                    let ty = self.check_expr(elem)?;
+                    if ty != first_ty {
+                        return Err(Diagnostic {
+                            error: CheckError::TypeMismatch {
+                                expected: first_ty.clone(),
+                                found: ty,
+                            },
+                            span: elem.span,
+                        });
+                    }
+                }
+
+                Type::Array(Box::new(first_ty))
             }
         };
 

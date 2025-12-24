@@ -111,17 +111,19 @@ impl Resolver {
                 } else {
                     return Err(Diagnostic {
                         error: CheckError::UndefinedVariable {
-                            var: target.clone(),
+                            var: target.to_string(),
                         },
                         span: stmt.span,
                     });
                 }
             }
             Stmt::Let { name, value, id } => {
-                self.resolve_expr(value)?;
+                if let Some(expr) = value {
+                    self.resolve_expr(expr)?;
+                }
 
+                // 2. Create the unique NodeId for this variable
                 let new_id = self.define(name.clone());
-
                 *id = Some(new_id);
             }
             Stmt::If {

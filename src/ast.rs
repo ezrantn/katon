@@ -32,13 +32,14 @@ pub enum Expr {
     Old(String, Option<NodeId>),
     Binary(Box<SExpr>, Op, Box<SExpr>),
     Cast(Type, Box<SExpr>),
+    ArrayLit(Vec<SExpr>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let {
         name: String,
-        value: SExpr,
+        value: Option<SExpr>,
         id: Option<NodeId>,
     },
     Assign {

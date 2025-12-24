@@ -1,0 +1,4 @@
+func main(x: nat) {
+    let y: nat = x - 10; 
+    // This should fail SMT verification because if x=0, y is -10.
+}

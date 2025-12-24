@@ -1,0 +1,5 @@
+func main(a: [int]) {
+    while true {
+        let b = a; // On second iteration, 'a' is already moved!
+    }
+}
