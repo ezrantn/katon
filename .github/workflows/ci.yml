@@ -41,7 +41,13 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run Clippy
+        shell: bash
         run: cargo clippy -- -D warnings
+        env:
+          Z3_SYS_Z3_HEADER: ${{ matrix.os == 'ubuntu-latest' && '/usr/include/z3.h' || (matrix.os == 'macos-latest' && '/opt/homebrew/include/z3.h' || '') }}
 
       - name: Run tests
+        shell: bash
         run: cargo test
+        env:
+          Z3_SYS_Z3_HEADER: ${{ matrix.os == 'ubuntu-latest' && '/usr/include/z3.h' || (matrix.os == 'macos-latest' && '/opt/homebrew/include/z3.h' || '') }}
