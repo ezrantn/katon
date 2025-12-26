@@ -35,16 +35,23 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install Z3 (System)
+      - name: Install Z3 (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             sudo apt-get update && sudo apt-get install -y z3 libz3-dev cmake g++
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             brew install z3 cmake
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            choco install z3
           fi
+
+      - name: Install Z3 (Windows Manual)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          curl -L https://github.com/Z3Prover/z3/releases/download/z3-4.12.2/z3-4.12.2-x64-win.zip -o z3.zip
+          unzip z3.zip
+          mv z3-4.12.2-x64-win /c/z3_install
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -58,9 +65,9 @@ jobs:
             export Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h
             export Z3_LIBRARY_PATH_OVERRIDE=$(brew --prefix z3)/lib
           elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            export Z3_SYS_Z3_HEADER="C:/tools/z3/include/z3.h"
-            export Z3_LIBRARY_PATH_OVERRIDE="C:/tools/z3/bin"
-            echo "C:/tools/z3/bin" >> $GITHUB_PATH
+            export Z3_SYS_Z3_HEADER="C:/z3_install/include/z3.h"
+            export Z3_LIBRARY_PATH_OVERRIDE="C:/z3_install/bin"
+            echo "C:/z3_install/bin" >> $GITHUB_PATH
           fi
 
           cargo clippy -- -D warnings
