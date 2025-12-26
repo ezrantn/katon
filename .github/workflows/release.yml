@@ -3,6 +3,7 @@ name: Release Katon
 on:
   push:
     tags: ["v*"]
+
 jobs:
   release:
     strategy:
@@ -10,26 +11,35 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: katon-linux
+            target_path: target/release/katon
           - os: macos-latest
             artifact_name: katon-macos
+            target_path: target/release/katon
           - os: windows-latest
             artifact_name: katon-windows.exe
+            target_path: target/release/katon.exe
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build deps
+        shell: bash
         run: |
           if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then sudo apt-get install -y cmake g++; fi
           if [ "${{ matrix.os }}" == "macos-latest" ]; then brew install cmake; fi
 
       - name: Build Release
-        run: cargo build --release --features bundled
+        run: cargo build --release --features static
+
+      - name: Rename Artifacts (Optional for clarity)
+        shell: bash
+        run: |
+          mv ${{ matrix.target_path }} target/release/${{ matrix.artifact_name }}
 
       - name: Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
           files: target/release/${{ matrix.artifact_name }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}s
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

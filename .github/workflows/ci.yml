@@ -14,12 +14,6 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
-    env:
-      Z3_SYS_Z3_HEADER: >-
-        ${{ matrix.os == 'ubuntu-latest' && '/usr/include/z3.h' || 
-            (matrix.os == 'macos-latest' && '/opt/homebrew/include/z3.h' || 
-            'C:/tools/z3/include/z3.h') }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,41 +23,20 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install Z3 (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install Build Dependencies
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y z3 libz3-dev
-
-      - name: Install Z3 (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install z3
-
-      - name: Install Z3 (Windows)
-        if: matrix.os == 'windows-latest'
-        run: choco install z3
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update && sudo apt-get install -y cmake g++
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            brew install cmake
+          fi
 
       - name: Check formatting
         run: cargo fmt -- --check
 
       - name: Run Clippy
-        shell: bash
-        run: |
-          # Set library path hanya untuk macOS dan Windows
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            export Z3_LIBRARY_PATH_OVERRIDE="/opt/homebrew/lib"
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            export Z3_LIBRARY_PATH_OVERRIDE="C:/tools/z3/bin"
-          fi
-          cargo clippy -- -D warnings
+        run: cargo clippy --features static -- -D warnings
 
       - name: Run tests
-        shell: bash
-        run: |
-          # Set library path hanya untuk macOS dan Windows
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            export Z3_LIBRARY_PATH_OVERRIDE="/opt/homebrew/lib"
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            export Z3_LIBRARY_PATH_OVERRIDE="C:/tools/z3/bin"
-          fi
-          cargo test
+        run: cargo test --features static
