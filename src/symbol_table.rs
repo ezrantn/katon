@@ -281,6 +281,19 @@ impl Resolver {
         // 2. Overwrite the dummy params with the real ones
         func.params = resolved_params;
 
+        for mod_name in &func.modifies {
+            if self.resolve(mod_name).is_none() {
+                return Err(Diagnostic {
+                    error: CheckError::UndefinedVariable {
+                        var: mod_name.clone(),
+                    },
+                    // You might need to add a span to FnDecl for 'modifies' specifically,
+                    // but for now, we'll use the function's general span.
+                    span: func.span,
+                });
+            }
+        }
+
         // 3. Proceed with the rest of the resolution
         for req in &mut func.requires {
             self.resolve_expr(req)?;

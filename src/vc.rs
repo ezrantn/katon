@@ -477,8 +477,37 @@ pub fn compile(func: &FnDecl, tcx: &TyCtx) -> Vec<String> {
         smt.push_str(&format!("(assert {})\n", req_smt));
     }
 
+    let initial_ids: HashSet<NodeId> = func.params.iter().map(|(id, _)| *id).collect();
+
     // 3. Process Body
     let final_env = process_block(&func.body, env, &mut smt, tcx, &mut vcs);
+
+    // Convert the string-based modifies list to NodeIds using the initial mapping
+    let modifies_ids: HashSet<NodeId> = func
+        .modifies
+        .iter()
+        .filter_map(|name| {
+            // Find which param ID this name belongs to
+            func.param_names
+                .iter()
+                .zip(func.params.iter())
+                .find(|(p_name, _)| *p_name == name)
+                .map(|(_, (id, _))| *id)
+        })
+        .collect();
+
+    for id in &initial_ids {
+        if !modifies_ids.contains(id) {
+            let initial_name = format!("{}_1", tcx.get_name(id)); // Version 1 is the param
+            let final_name = final_env.name(*id, tcx);
+
+            // If the version changed but it wasn't in modifies,
+            // the TypeChecker should have caught it, but we assert it here for the SMT
+            if initial_name != final_name {
+                smt.push_str(&format!("(assert (= {} {}))\n", final_name, initial_name));
+            }
+        }
+    }
 
     // 4. Add Postconditions as Checks
     for ens in &func.ensures {
@@ -539,6 +568,7 @@ mod tests {
         let func = FnDecl {
             name: "abs".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             params: vec![(x_id, Type::Int)],
             param_names: vec!["x".to_string()],
             requires: vec![],
@@ -630,6 +660,7 @@ mod tests {
         let func = FnDecl {
             name: "buggy_loop".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["n".to_string()],
             params: vec![(n_id, Type::Int)],
             requires: vec![bin(var("n", 0), Op::Gt, int(0))],
@@ -682,6 +713,7 @@ mod tests {
         let func = FnDecl {
             name: "update".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["arr".to_string()],
             params: vec![(arr_id, Type::Array(99, Box::new(Type::Int)))],
             requires: vec![],
@@ -722,6 +754,7 @@ mod tests {
         let func = FnDecl {
             name: "borrow_test".into(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".into()],
             params: vec![(x, Type::Array(10, Box::new(Type::Int)))],
             requires: vec![],
@@ -759,6 +792,7 @@ mod tests {
         let func = FnDecl {
             name: "update_test".into(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".into()],
             params: vec![(x, Type::Array(10, Box::new(Type::Int)))],
             requires: vec![],

@@ -94,6 +94,7 @@ pub struct FnDecl {
     pub name: String,
     pub params: Vec<(NodeId, Type)>,
     pub param_names: Vec<String>,
+    pub modifies: Vec<String>,
     pub requires: Vec<SExpr>,
     pub ensures: Vec<SExpr>,
     pub body: Vec<SStmt>,

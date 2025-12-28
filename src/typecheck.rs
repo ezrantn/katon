@@ -5,14 +5,21 @@ use katon_core::errors::{CheckError, Diagnostic};
 
 pub struct TypeChecker<'a> {
     tcx: &'a mut TyCtx,
+    current_modifies: Vec<String>,
 }
 
 impl<'a> TypeChecker<'a> {
-    pub fn new(tcx: &'a mut TyCtx) -> Self {
-        Self { tcx }
+    pub fn new(tcx: &'a mut TyCtx, current_modifies: Vec<String>) -> Self {
+        Self {
+            tcx,
+            current_modifies,
+        }
     }
 
     pub fn check_fn(&mut self, f: &FnDecl) -> Result<(), Diagnostic> {
+        // Store the modifies list for this function scope
+        self.current_modifies = f.modifies.clone();
+
         // params already have types
         for (id, ty) in &f.params {
             self.tcx.node_types.insert(*id, ty.clone());
@@ -22,6 +29,19 @@ impl<'a> TypeChecker<'a> {
             self.check_stmt(stmt)?;
         }
 
+        Ok(())
+    }
+
+    fn ensure_modifiable(&self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        if !self.current_modifies.iter().any(|m| m == name) {
+            return Err(self.type_error(
+                &format!(
+                    "variable '{}' is not marked as modifiable in function signature",
+                    name
+                ),
+                span,
+            ));
+        }
         Ok(())
     }
 
@@ -39,6 +59,7 @@ impl<'a> TypeChecker<'a> {
         if matches!(expected, Type::Int) && matches!(found, Type::Nat) {
             return true;
         }
+
         false
     }
 
@@ -50,7 +71,7 @@ impl<'a> TypeChecker<'a> {
         &mut self,
         then_block: &[SStmt],
         else_block: &[SStmt],
-        span: Span,
+        _span: Span,
     ) -> Result<(), Diagnostic> {
         let snapshot = self.tcx.node_types.clone();
 
@@ -61,22 +82,9 @@ impl<'a> TypeChecker<'a> {
         self.check_block(else_block)?;
         let else_types = self.tcx.node_types.clone();
 
-        // Only keep variables defined in BOTH branches
         self.tcx.node_types = snapshot;
-        for (id, ty) in then_types {
-            if let Some(ty2) = else_types.get(&id) {
-                if ty == *ty2 {
-                    self.tcx.node_types.insert(id, ty);
-                } else {
-                    return Err(Diagnostic {
-                        error: CheckError::TypeMismatch {
-                            expected: ty,
-                            found: ty2.clone(),
-                        },
-                        span,
-                    });
-                }
-            }
+        for (id, ty) in then_types.into_iter().chain(else_types) {
+            self.tcx.node_types.entry(id).or_insert(ty);
         }
 
         Ok(())
@@ -122,17 +130,26 @@ impl<'a> TypeChecker<'a> {
                 Ok(())
             }
             Stmt::Assign {
-                value, target_id, ..
+                target,
+                value,
+                target_id,
+                ..
             } => {
-                let rhs_ty = self.check_expr(value)?;
                 let id = target_id.expect("Resolver must assign ID");
 
-                let lhs_ty = self
-                    .tcx
-                    .node_types
-                    .get(&id)
-                    .cloned()
-                    .ok_or(self.type_error("assign to untyped variable", stmt.span))?;
+                // 1. Variable must exist
+                let lhs_ty = self.tcx.node_types.get(&id).cloned().ok_or(Diagnostic {
+                    error: CheckError::UndefinedVariable {
+                        var: target.clone(),
+                    },
+                    span: stmt.span,
+                })?;
+
+                // 2. THEN check modifiability
+                self.ensure_modifiable(target, stmt.span)?;
+
+                // 3. Then type-check RHS
+                let rhs_ty = self.check_expr(value)?;
 
                 if !self.check_compatibility(&lhs_ty, &rhs_ty) {
                     return Err(Diagnostic {
@@ -184,11 +201,14 @@ impl<'a> TypeChecker<'a> {
                 Ok(())
             }
             Stmt::ArrayUpdate {
+                target,
                 target_id,
                 index,
                 value,
                 ..
             } => {
+                self.ensure_modifiable(target, stmt.span)?;
+
                 let id = target_id.expect("Resolver must assign ID");
                 let arr_ty = self
                     .tcx
@@ -410,7 +430,7 @@ mod tests {
 
     fn checker() -> TypeChecker<'static> {
         let tcx = Box::leak(Box::new(TyCtx::default()));
-        TypeChecker::new(tcx)
+        TypeChecker::new(tcx, vec![])
     }
 
     #[test]
@@ -440,7 +460,7 @@ mod tests {
 
         let stmt = SStmt {
             node: Stmt::Assign {
-                target: "=".to_string(),
+                target: "x".to_string(),
                 target_id: Some(NodeId(1)),
                 value: SExpr {
                     node: Expr::BoolLit(true),
@@ -449,6 +469,9 @@ mod tests {
             },
             span: Span::dummy(),
         };
+
+        tc.current_modifies = vec!["x".to_string()];
+        tc.tcx.node_types.insert(NodeId(1), Type::Int);
 
         let err = tc.check_stmt(&stmt).unwrap_err();
         assert!(matches!(err.error, CheckError::TypeMismatch { .. }));

@@ -203,6 +203,7 @@ mod tests {
         let mut func = FnDecl {
             name: "Vacuous".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(x_id, Type::Nat)],
             requires: vec![
@@ -245,6 +246,7 @@ mod tests {
         let func = FnDecl {
             name: "BrokenScope".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             params: vec![(c_id, Type::Int)],
             param_names: vec!["c".to_string()],
             requires: vec![],
@@ -252,24 +254,31 @@ mod tests {
             body: vec![
                 Spanned::dummy(Stmt::If {
                     cond: bin(var("c", Some(0)), Op::Gt, int(0)),
-                    then_block: vec![Spanned::dummy(Stmt::Assign {
-                        target: "y".to_string(),
-                        target_id: Some(NodeId(1)),
-                        value: int(50),
+                    then_block: vec![Spanned::dummy(Stmt::Let {
+                        name: "y".to_string(),
+                        ty: Some(Type::Int),
+                        id: Some(NodeId(1)),
+                        value: Some(int(50)),
                     })],
                     else_block: vec![
                         // Empty else
                     ],
                 }),
-                Spanned::dummy(Stmt::Assign {
-                    target: "z".to_string(),
-                    target_id: Some(NodeId(2)),
-                    value: bin(var("y", Some(1)), Op::Add, int(1)),
+                Spanned::dummy(Stmt::Let {
+                    name: "z".to_string(),
+                    ty: Some(Type::Int),
+                    id: Some(NodeId(2)),
+                    value: Some(bin(var("y", Some(1)), Op::Add, int(1))),
                 }),
             ],
         };
 
-        // This must FAIL the BORROW CHECKER (not Z3)
+        // 1. Run TypeChecker FIRST
+        let mut tc = TypeChecker::new(&mut tcx, vec![]);
+        let tc_result = tc.check_fn(&func);
+        assert!(tc_result.is_ok(), "TypeChecker should succeed");
+
+        // 2. Then run BorrowChecker
         let mut checker = BorrowChecker::new();
         let result = checker.check_fn(&func, &mut tcx);
 
@@ -306,6 +315,7 @@ mod tests {
         let func = FnDecl {
             name: "Nested".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(x_id, Type::Int)],
             requires: vec![],
@@ -363,6 +373,7 @@ mod tests {
         let mut func = FnDecl {
             name: "Math".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(NodeId(0), Type::Int)],
             requires: vec![bin(var("x", None), Op::Gt, int(0))],
@@ -385,7 +396,7 @@ mod tests {
 
         resolver.resolve_function(&mut func, &mut tcx).unwrap();
 
-        let mut tc = TypeChecker::new(&mut tcx);
+        let mut tc = TypeChecker::new(&mut tcx, vec![]);
         tc.check_fn(&func).unwrap();
 
         let result = runner::verify_with_z3(&func, &tcx);
@@ -410,6 +421,7 @@ mod tests {
         let func = FnDecl {
             name: "BadLoop".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(x_id, Type::Int)],
             requires: vec![],

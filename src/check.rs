@@ -2,11 +2,13 @@
 use crate::symbol_table::TyCtx;
 use katon_core::ast::{Expr, FnDecl, NodeId, Op, SExpr, SStmt, Stmt, Type};
 use katon_core::errors::{CheckError, Diagnostic};
+use katon_core::span::Span;
 use std::collections::HashMap;
 
 pub struct BorrowChecker {
     scope: HashMap<NodeId, (bool, Type)>, // Name -> IsAlive?
     id_to_name: HashMap<NodeId, String>,
+    current_modifies: Vec<String>,
 }
 
 impl Default for BorrowChecker {
@@ -20,10 +22,13 @@ impl BorrowChecker {
         Self {
             scope: HashMap::new(),
             id_to_name: HashMap::new(),
+            current_modifies: vec![],
         }
     }
 
     pub fn check_fn(&mut self, func: &FnDecl, tcx: &mut TyCtx) -> Result<(), Diagnostic> {
+        self.current_modifies = func.modifies.clone();
+
         // Initialize args as Alive
         // Register variable as Alive with its Type
         for (id, ty) in &func.params {
@@ -35,6 +40,21 @@ impl BorrowChecker {
             self.check_stmt(stmt, tcx)?;
         }
 
+        Ok(())
+    }
+
+    fn ensure_modifiable(&self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        if !self.current_modifies.iter().any(|m| m == name) {
+            return Err(Diagnostic {
+                error: CheckError::TypeError {
+                    msg: format!(
+                        "Variable '{}' cannot be reassigned because it is not in the modifies clause",
+                        name
+                    ),
+                },
+                span,
+            });
+        }
         Ok(())
     }
 
@@ -52,12 +72,18 @@ impl BorrowChecker {
                 target_id,
                 value,
             } => {
-                // Check RHS first (Use)
+                // Check RHS first
                 self.check_expr(value, tcx)?;
 
-                // Revive LHS (Define)
-                // Get the unique ID for this target
                 let id = target_id.expect("Resolver should have caught this");
+
+                // VARIABLE MUST EXIST
+                let (alive, ty) = self.scope.get(&id).cloned().ok_or(Diagnostic {
+                    error: CheckError::UndefinedVariable {
+                        var: target.clone(),
+                    },
+                    span: stmt.span,
+                })?;
 
                 if tcx.borrows.contains_key(&id) {
                     return Err(Diagnostic {
@@ -68,12 +94,15 @@ impl BorrowChecker {
                     });
                 }
 
-                // Get the type from the global type table (populated by inference or decls)
-                let ty = tcx.node_types.get(&id).cloned().unwrap_or(Type::Int);
+                // VARIABLE MUST BE ALIVE
+                if alive {
+                    self.ensure_modifiable(target, stmt.span)?;
+                }
 
-                // Mark as alive in current dataflow scope
+                // Assignment revives variable
                 self.scope.insert(id, (true, ty));
                 self.id_to_name.insert(id, target.clone());
+
                 Ok(())
             }
             Stmt::Let {
@@ -127,10 +156,7 @@ impl BorrowChecker {
                 // Merge
                 let merged = self.merge_scopes(then_scope, else_scope);
 
-                self.scope = merged
-                    .into_iter()
-                    .filter(|(id, _)| outer_scope.contains_key(id))
-                    .collect();
+                self.scope = merged;
 
                 Ok(())
             }
@@ -188,7 +214,25 @@ impl BorrowChecker {
                 // Check the Value expression (Read/Move)
                 self.check_expr(value, tcx)?;
 
-                let id = target_id.expect("Resolver should have assigned an ID to array target");
+                let id = target_id.expect("resolver");
+
+                let (alive, _ty) = self.scope.get(&id).cloned().ok_or(Diagnostic {
+                    error: CheckError::UndefinedVariable {
+                        var: target.clone(),
+                    },
+                    span: stmt.span,
+                })?;
+
+                if !alive {
+                    return Err(Diagnostic {
+                        error: CheckError::UndefinedVariable {
+                            var: target.clone(),
+                        },
+                        span: stmt.span,
+                    });
+                }
+
+                self.ensure_modifiable(target, stmt.span)?;
 
                 if tcx.borrows.contains_key(&id) {
                     return Err(Diagnostic {
@@ -393,6 +437,8 @@ mod tests {
     use katon_core::ast::{Op, Type};
     use katon_core::span::{Span, Spanned};
 
+    use crate::typecheck::TypeChecker;
+
     use super::*;
 
     fn var(name: &str, id: u32) -> SExpr {
@@ -415,7 +461,7 @@ mod tests {
     fn test_borrow_checker_moves() {
         // SCENARIO:
         //
-        // func test(x int) {
+        // func test(x: int) {
         //    if true {
         //       let y = x; // x is COPIED here (not moved)
         //    } else {
@@ -428,13 +474,16 @@ mod tests {
         let mut bc = BorrowChecker::new();
         let mut tcx = TyCtx::new();
 
-        // Define the ID for 'x' and register it in the context
         let x_id = NodeId(0);
         tcx.define_local(x_id, "x", Type::Int);
+
+        tcx.node_types.insert(NodeId(1), Type::Int); // y
+        tcx.node_types.insert(NodeId(2), Type::Int); // z
 
         let func = FnDecl {
             name: "test".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(x_id, Type::Int)],
             requires: vec![],
@@ -442,17 +491,19 @@ mod tests {
             body: vec![
                 Spanned::dummy(Stmt::If {
                     cond: bool_lit(true),
-                    then_block: vec![Spanned::dummy(Stmt::Assign {
-                        target: "y".to_string(),
-                        target_id: Some(NodeId(1)),
-                        value: var("x", 0),
+                    then_block: vec![Spanned::dummy(Stmt::Let {
+                        name: "y".to_string(),
+                        ty: Some(Type::Int),
+                        id: Some(NodeId(1)),
+                        value: Some(var("x", 0)),
                     })],
                     else_block: vec![],
                 }),
-                Spanned::dummy(Stmt::Assign {
-                    target: "z".to_string(),
-                    target_id: Some(NodeId(2)),
-                    value: var("x", 0),
+                Spanned::dummy(Stmt::Let {
+                    name: "z".to_string(),
+                    ty: Some(Type::Int),
+                    id: Some(NodeId(2)),
+                    value: Some(var("x", 0)),
                 }),
             ],
         };
@@ -465,9 +516,9 @@ mod tests {
     fn test_copy_semantics_for_int_and_nat() {
         // SCENARIO:
         //
-        // func test(x int, y nat) {
-        //      z = x + x;
-        //      w = y * y;
+        // func test(x: int, y: nat) {
+        //      let z = x + x;
+        //      let w = y * y;
         // }
         //
         // This fails if Borrow Checker treats Int/Nat as "Move" (Affine)
@@ -476,38 +527,42 @@ mod tests {
         let mut tcx = TyCtx::new();
 
         let x_id = NodeId(0);
-        tcx.define_local(x_id, "x", Type::Int);
-
         let y_id = NodeId(1);
+
+        tcx.define_local(x_id, "x", Type::Int);
         tcx.define_local(y_id, "y", Type::Nat);
+
+        tcx.node_types.insert(NodeId(2), Type::Int); // z
+        tcx.node_types.insert(NodeId(3), Type::Nat); // w
 
         let func = FnDecl {
             name: "math_test".to_string(),
             span: Span::dummy(),
-            param_names: vec!["x".to_string()],
+            modifies: vec![], // no reassignment, OK
+            param_names: vec!["x".to_string(), "y".to_string()],
             params: vec![(x_id, Type::Int), (y_id, Type::Nat)],
             requires: vec![],
             ensures: vec![],
             body: vec![
-                // 1. Test Int Copy: z = x + x
-                Spanned::dummy(Stmt::Assign {
-                    target: "z".to_string(),
-                    target_id: Some(NodeId(1)),
-                    value: bin(var("x", 0), Op::Add, var("x", 0)),
+                // let z = x + x;
+                Spanned::dummy(Stmt::Let {
+                    name: "z".to_string(),
+                    ty: Some(Type::Int),
+                    id: Some(NodeId(2)),
+                    value: Some(bin(var("x", 0), Op::Add, var("x", 0))),
                 }),
-                // 2. Test Nat Copy: w = y * y
-                Spanned::dummy(Stmt::Assign {
-                    target: "w".to_string(),
-                    target_id: Some(NodeId(2)),
-                    value: bin(var("y", 1), Op::Mul, var("y", 1)),
+                // let w = y * y;
+                Spanned::dummy(Stmt::Let {
+                    name: "w".to_string(),
+                    ty: Some(Type::Nat),
+                    id: Some(NodeId(3)),
+                    value: Some(bin(var("y", 1), Op::Mul, var("y", 1))),
                 }),
             ],
         };
 
         let result = bc.check_fn(&func, &mut tcx);
-
-        // Should pass
-        assert!(result.is_ok(), "Int and Nat should be Copy types!")
+        assert!(result.is_ok(), "Int and Nat should be Copy types!");
     }
 
     #[test]
@@ -533,6 +588,7 @@ mod tests {
         let func = FnDecl {
             name: "scope_leak".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["x".to_string()],
             params: vec![(x_id, Type::Int)],
             requires: vec![],
@@ -595,37 +651,39 @@ mod tests {
         let func = FnDecl {
             name: "merge_valid".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["cond".to_string()],
             params: vec![(cond_id, Type::Int)],
             requires: vec![],
             ensures: vec![],
             body: vec![
-                Spanned::dummy(Stmt::Assign {
-                    target: "y".to_string(),
-                    target_id: Some(y_id),
-                    value: int(0),
-                }),
                 Spanned::dummy(Stmt::If {
                     cond: bin(var("cond", 0), Op::Gt, int(0)),
-                    then_block: vec![Spanned::dummy(Stmt::Assign {
-                        target: "y".to_string(),
-                        target_id: Some(y_id),
-                        value: int(1),
+                    then_block: vec![Spanned::dummy(Stmt::Let {
+                        name: "y".to_string(),
+                        ty: Some(Type::Int),
+                        id: Some(y_id),
+                        value: Some(int(1)),
                     })],
-                    else_block: vec![Spanned::dummy(Stmt::Assign {
-                        target: "y".to_string(),
-                        target_id: Some(y_id),
-                        value: int(2),
+                    else_block: vec![Spanned::dummy(Stmt::Let {
+                        name: "y".to_string(),
+                        ty: Some(Type::Int),
+                        id: Some(y_id),
+                        value: Some(int(2)),
                     })],
                 }),
-                // Should succeed because 'y' exists in both paths
-                Spanned::dummy(Stmt::Assign {
-                    target: "z".to_string(),
-                    target_id: Some(z_id),
-                    value: var("y", 1),
+                Spanned::dummy(Stmt::Let {
+                    name: "z".to_string(),
+                    ty: Some(Type::Int),
+                    id: Some(z_id),
+                    value: Some(var("y", 1)),
                 }),
             ],
         };
+
+        let mut tc = TypeChecker::new(&mut tcx, vec![]);
+        let tc_result = tc.check_fn(&func);
+        assert!(tc_result.is_ok(), "TypeChecker should succeed");
 
         let result = bc.check_fn(&func, &mut tcx);
         assert!(result.is_ok())
@@ -647,6 +705,7 @@ mod tests {
         let func = FnDecl {
             name: "bad_var".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec![],
             params: vec![],
             requires: vec![],
@@ -691,28 +750,36 @@ mod tests {
         let func = FnDecl {
             name: "test_move".to_string(),
             span: Span::dummy(),
+            modifies: vec![],
             param_names: vec!["arr".to_string(), "c".to_string()],
-            params: vec![(arr_id, arr_type), (c_id, Type::Int)],
+            params: vec![(arr_id, arr_type.clone()), (c_id, Type::Int)],
             requires: vec![],
             ensures: vec![],
             body: vec![
+                // if c > 0 { let b = arr; }
                 Spanned::dummy(Stmt::If {
                     cond: bin(var("c", 1), Op::Gt, int(0)),
-                    then_block: vec![Spanned::dummy(Stmt::Assign {
-                        target: "b".to_string(),
-                        target_id: Some(NodeId(2)),
-                        value: var("arr", 0), // Move occurs here
+                    then_block: vec![Spanned::dummy(Stmt::Let {
+                        name: "b".to_string(),
+                        ty: Some(arr_type.clone()),
+                        id: Some(NodeId(2)),
+                        value: Some(var("arr", 0)), // MOVE here
                     })],
-                    else_block: vec![], // arr remains alive here
+                    else_block: vec![],
                 }),
-                // This should fail because 'arr' is not alive in the 'then' path
-                Spanned::dummy(Stmt::Assign {
-                    target: "z".to_string(),
-                    target_id: Some(NodeId(3)),
-                    value: var("arr", 0),
+                // let z = arr;  // ERROR
+                Spanned::dummy(Stmt::Let {
+                    name: "z".to_string(),
+                    ty: Some(arr_type),
+                    id: Some(NodeId(3)),
+                    value: Some(var("arr", 0)),
                 }),
             ],
         };
+
+        let mut tc = TypeChecker::new(&mut tcx, vec![]);
+        let tc_result = tc.check_fn(&func);
+        assert!(tc_result.is_ok(), "TypeChecker should succeed");
 
         let result = bc.check_fn(&func, &mut tcx);
         assert!(result.is_err());
@@ -850,6 +917,7 @@ mod tests {
             .insert(x, Type::Array(10, Box::new(Type::Int)));
         tcx.borrows.insert(x, NodeId(99)); // fake borrow owner
 
+        bc.current_modifies.push("x".into());
         bc.scope.insert(x, (true, tcx.node_types[&x].clone()));
 
         let stmt = SStmt {

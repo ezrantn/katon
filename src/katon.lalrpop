@@ -122,6 +122,10 @@ Comma<T>: Vec<T> = {
     }
 };
 
+Modifies: Vec<String> = {
+    "modifies" <ids:Comma<Ident>> => ids
+};
+
 // ===========================================
 // 2. Statements
 // ===========================================
@@ -238,7 +242,7 @@ Params: Vec<(String, Type)> = {
 };
 
 pub FnDecl: Spanned<FnDecl> = {
-    <l:@L> "func" <name:Ident> "(" <ps:Params> ")" "{" 
+    <l:@L> "func" <name:Ident> "(" <ps:Params> ")" <modi:Modifies?> "{" 
         <req:Requires*>
         <body:Stmt*>
         <ens:Ensures*>
@@ -256,6 +260,7 @@ pub FnDecl: Spanned<FnDecl> = {
             params,
             span: Span::new(l, r), 
             param_names,
+            modifies: modi.unwrap_or_default(),
             requires: req,
             ensures: ens,
             body,

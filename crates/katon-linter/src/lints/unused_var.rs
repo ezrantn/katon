@@ -43,6 +43,7 @@ mod tests {
         let func = FnDecl {
             name: "f".into(),
             params: vec![],
+            modifies: vec![],
             param_names: vec![],
             requires: vec![],
             ensures: vec![],
@@ -70,6 +71,7 @@ mod tests {
             name: "f".into(),
             params: vec![],
             param_names: vec![],
+            modifies: vec![],
             requires: vec![],
             ensures: vec![],
             body: vec![
